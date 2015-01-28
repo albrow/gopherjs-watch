@@ -1,5 +1,5 @@
 "use strict";
-(function() {
+(function($topLevelThis) {
 
 Error.stackTraceLimit = Infinity;
 
@@ -11,28 +11,33 @@ if (typeof window !== "undefined") { /* web page */
 } else if (typeof global !== "undefined") { /* Node.js */
   $global = global;
   $global.require = require;
-} else {
-  console.log("warning: no global object found");
+} else { /* others (e.g. Nashorn) */
+  $global = $topLevelThis;
+}
+
+if ($global === undefined || $global.Array === undefined) {
+  throw new Error("no global object found");
 }
 if (typeof module !== "undefined") {
   $module = module;
 }
 
-var $packages = {}, $reflect, $idCounter = 0;
+var $packages = {}, $idCounter = 0;
 var $keys = function(m) { return m ? Object.keys(m) : []; };
 var $min = Math.min;
 var $mod = function(x, y) { return x % y; };
 var $parseInt = parseInt;
 var $parseFloat = function(f) {
-  if (f.constructor === Number) {
+  if (f !== undefined && f !== null && f.constructor === Number) {
     return f;
   }
   return parseFloat(f);
 };
+var $flushConsole = function() {};
 
 var $mapArray = function(array, f) {
-  var newArray = new array.constructor(array.length), i;
-  for (i = 0; i < array.length; i++) {
+  var newArray = new array.constructor(array.length);
+  for (var i = 0; i < array.length; i++) {
     newArray[i] = f(array[i]);
   }
   return newArray;
@@ -172,8 +177,8 @@ var $encodeRune = function(r) {
 };
 
 var $stringToBytes = function(str) {
-  var array = new Uint8Array(str.length), i;
-  for (i = 0; i < str.length; i++) {
+  var array = new Uint8Array(str.length);
+  for (var i = 0; i < str.length; i++) {
     array[i] = str.charCodeAt(i);
   }
   return array;
@@ -183,8 +188,8 @@ var $bytesToString = function(slice) {
   if (slice.$length === 0) {
     return "";
   }
-  var str = "", i;
-  for (i = 0; i < slice.$length; i += 10000) {
+  var str = "";
+  for (var i = 0; i < slice.$length; i += 10000) {
     str += String.fromCharCode.apply(null, slice.$array.subarray(slice.$offset + i, slice.$offset + Math.min(slice.$length, i + 10000)));
   }
   return str;
@@ -192,8 +197,8 @@ var $bytesToString = function(slice) {
 
 var $stringToRunes = function(str) {
   var array = new Int32Array(str.length);
-  var rune, i, j = 0;
-  for (i = 0; i < str.length; i += rune[1], j++) {
+  var rune, j = 0;
+  for (var i = 0; i < str.length; i += rune[1], j++) {
     rune = $decodeRune(str, i);
     array[j] = rune[0];
   }
@@ -204,50 +209,51 @@ var $runesToString = function(slice) {
   if (slice.$length === 0) {
     return "";
   }
-  var str = "", i;
-  for (i = 0; i < slice.$length; i++) {
+  var str = "";
+  for (var i = 0; i < slice.$length; i++) {
     str += $encodeRune(slice.$array[slice.$offset + i]);
   }
   return str;
 };
 
 var $copyString = function(dst, src) {
-  var n = Math.min(src.length, dst.$length), i;
-  for (i = 0; i < n; i++) {
+  var n = Math.min(src.length, dst.$length);
+  for (var i = 0; i < n; i++) {
     dst.$array[dst.$offset + i] = src.charCodeAt(i);
   }
   return n;
 };
 
 var $copySlice = function(dst, src) {
-  var n = Math.min(src.$length, dst.$length), i;
+  var n = Math.min(src.$length, dst.$length);
   $internalCopy(dst.$array, src.$array, dst.$offset, src.$offset, n, dst.constructor.elem);
   return n;
 };
 
 var $copy = function(dst, src, type) {
-  var i;
   switch (type.kind) {
-  case "Array":
+  case $kindArray:
     $internalCopy(dst, src, 0, 0, src.length, type.elem);
-    return true;
-  case "Struct":
-    for (i = 0; i < type.fields.length; i++) {
-      var field = type.fields[i];
-      var name = field[0];
-      if (!$copy(dst[name], src[name], field[3])) {
-        dst[name] = src[name];
+    break;
+  case $kindStruct:
+    for (var i = 0; i < type.fields.length; i++) {
+      var f = type.fields[i];
+      switch (f.type.kind) {
+      case $kindArray:
+      case $kindStruct:
+        $copy(dst[f.prop], src[f.prop], f.type);
+        continue;
+      default:
+        dst[f.prop] = src[f.prop];
+        continue;
       }
     }
-    return true;
-  default:
-    return false;
+    break;
   }
 };
 
 var $internalCopy = function(dst, src, dstOffset, srcOffset, n, elem) {
-  var i;
-  if (n === 0) {
+  if (n === 0 || (dst === src && dstOffset === srcOffset)) {
     return;
   }
 
@@ -257,15 +263,27 @@ var $internalCopy = function(dst, src, dstOffset, srcOffset, n, elem) {
   }
 
   switch (elem.kind) {
-  case "Array":
-  case "Struct":
-    for (i = 0; i < n; i++) {
+  case $kindArray:
+  case $kindStruct:
+    if (dst === src && dstOffset > srcOffset) {
+      for (var i = n - 1; i >= 0; i--) {
+        $copy(dst[dstOffset + i], src[srcOffset + i], elem);
+      }
+      return;
+    }
+    for (var i = 0; i < n; i++) {
       $copy(dst[dstOffset + i], src[srcOffset + i], elem);
     }
     return;
   }
 
-  for (i = 0; i < n; i++) {
+  if (dst === src && dstOffset > srcOffset) {
+    for (var i = n - 1; i >= 0; i--) {
+      dst[dstOffset + i] = src[srcOffset + i];
+    }
+    return;
+  }
+  for (var i = 0; i < n; i++) {
     dst[dstOffset + i] = src[srcOffset + i];
   }
 };
@@ -274,6 +292,30 @@ var $clone = function(src, type) {
   var clone = type.zero();
   $copy(clone, src, type);
   return clone;
+};
+
+var $pointerOfStructConversion = function(obj, type) {
+  if(obj.$proxies === undefined) {
+    obj.$proxies = {};
+    obj.$proxies[obj.constructor.string] = obj;
+  }
+  var proxy = obj.$proxies[type.string];
+  if (proxy === undefined) {
+    var properties = {};
+    for (var i = 0; i < type.elem.fields.length; i++) {
+      (function(fieldProp) {
+        properties[fieldProp] = {
+          get: function() { return obj[fieldProp]; },
+          set: function(value) { obj[fieldProp] = value; },
+        };
+      })(type.elem.fields[i].prop);
+    }
+    proxy = Object.create(type.prototype, properties);
+    proxy.$val = proxy;
+    obj.$proxies[type.string] = proxy;
+    proxy.$proxies = obj.$proxies;
+  }
+  return proxy;
 };
 
 var $append = function(slice) {
@@ -301,8 +343,8 @@ var $internalAppend = function(slice, array, offset, length) {
     if (slice.$array.constructor === Array) {
       newArray = slice.$array.slice(slice.$offset, slice.$offset + slice.$length);
       newArray.length = newCapacity;
-      var zero = slice.constructor.elem.zero, i;
-      for (i = slice.$length; i < newCapacity; i++) {
+      var zero = slice.constructor.elem.zero;
+      for (var i = slice.$length; i < newCapacity; i++) {
         newArray[i] = zero();
       }
     } else {
@@ -321,80 +363,71 @@ var $internalAppend = function(slice, array, offset, length) {
 };
 
 var $equal = function(a, b, type) {
-  if (a === b) {
-    return true;
-  }
-  var i;
   switch (type.kind) {
-  case "Float32":
+  case $kindFloat32:
     return $float32IsEqual(a, b);
-  case "Complex64":
+  case $kindComplex64:
     return $float32IsEqual(a.$real, b.$real) && $float32IsEqual(a.$imag, b.$imag);
-  case "Complex128":
+  case $kindComplex128:
     return a.$real === b.$real && a.$imag === b.$imag;
-  case "Int64":
-  case "Uint64":
+  case $kindInt64:
+  case $kindUint64:
     return a.$high === b.$high && a.$low === b.$low;
-  case "Ptr":
-    if (a.constructor.Struct) {
-      return false;
+  case $kindPtr:
+    if (a.constructor.elem) {
+      return a === b;
     }
     return $pointerIsEqual(a, b);
-  case "Array":
+  case $kindArray:
     if (a.length != b.length) {
       return false;
     }
-    var i;
-    for (i = 0; i < a.length; i++) {
+    for (var i = 0; i < a.length; i++) {
       if (!$equal(a[i], b[i], type.elem)) {
         return false;
       }
     }
     return true;
-  case "Struct":
-    for (i = 0; i < type.fields.length; i++) {
-      var field = type.fields[i];
-      var name = field[0];
-      if (!$equal(a[name], b[name], field[3])) {
+  case $kindStruct:
+    for (var i = 0; i < type.fields.length; i++) {
+      var f = type.fields[i];
+      if (!$equal(a[f.prop], b[f.prop], f.type)) {
         return false;
       }
     }
     return true;
+  case $kindInterface:
+    if (type === $js.Object) {
+      return a === b;
+    }
+    return $interfaceIsEqual(a, b);
   default:
-    return false;
+    return a === b;
   }
 };
 
 var $interfaceIsEqual = function(a, b) {
-  if (a === null || b === null || a === undefined || b === undefined || a.constructor !== b.constructor) {
+  if (a === $ifaceNil || b === $ifaceNil) {
     return a === b;
   }
-  switch (a.constructor.kind) {
-  case "Func":
-  case "Map":
-  case "Slice":
-  case "Struct":
+  if (a.constructor !== b.constructor) {
+    return false;
+  }
+  if (!a.constructor.comparable) {
     $throwRuntimeError("comparing uncomparable type " + a.constructor.string);
-  case undefined: /* js.Object */
-    return a === b;
-  default:
-    return $equal(a.$val, b.$val, a.constructor);
   }
+  return $equal(a.$val, b.$val, a.constructor);
 };
 
 var $float32IsEqual = function(a, b) {
   if (a === b) {
     return true;
   }
-  if (a === 0 || b === 0 || a === 1/0 || b === 1/0 || a === -1/0 || b === -1/0 || a !== a || b !== b) {
+  if (a === 1/0 || b === 1/0 || a === -1/0 || b === -1/0 || a !== a || b !== b) {
     return false;
   }
   var math = $packages["math"];
   return math !== undefined && math.Float32bits(a) === math.Float32bits(b);
-};
-
-var $sliceIsEqual = function(a, ai, b, bi) {
-  return a.$array === b.$array && a.$offset + ai === b.$offset + bi;
 };
 
 var $pointerIsEqual = function(a, b) {
@@ -404,40 +437,71 @@ var $pointerIsEqual = function(a, b) {
   if (a.$get === $throwNilPointerError || b.$get === $throwNilPointerError) {
     return a.$get === $throwNilPointerError && b.$get === $throwNilPointerError;
   }
-  var old = a.$get();
-  var dummy = new Object();
+  var va = a.$get();
+  var vb = b.$get();
+  if (va !== vb) {
+    return false;
+  }
+  var dummy = va + 1;
   a.$set(dummy);
   var equal = b.$get() === dummy;
-  a.$set(old);
+  a.$set(va);
   return equal;
 };
 
-var $newType = function(size, kind, string, name, pkgPath, constructor) {
+var $kindBool = 1;
+var $kindInt = 2;
+var $kindInt8 = 3;
+var $kindInt16 = 4;
+var $kindInt32 = 5;
+var $kindInt64 = 6;
+var $kindUint = 7;
+var $kindUint8 = 8;
+var $kindUint16 = 9;
+var $kindUint32 = 10;
+var $kindUint64 = 11;
+var $kindUintptr = 12;
+var $kindFloat32 = 13;
+var $kindFloat64 = 14;
+var $kindComplex64 = 15;
+var $kindComplex128 = 16;
+var $kindArray = 17;
+var $kindChan = 18;
+var $kindFunc = 19;
+var $kindInterface = 20;
+var $kindMap = 21;
+var $kindPtr = 22;
+var $kindSlice = 23;
+var $kindString = 24;
+var $kindStruct = 25;
+var $kindUnsafePointer = 26;
+
+var $newType = function(size, kind, string, name, pkg, constructor) {
   var typ;
   switch(kind) {
-  case "Bool":
-  case "Int":
-  case "Int8":
-  case "Int16":
-  case "Int32":
-  case "Uint":
-  case "Uint8" :
-  case "Uint16":
-  case "Uint32":
-  case "Uintptr":
-  case "String":
-  case "UnsafePointer":
+  case $kindBool:
+  case $kindInt:
+  case $kindInt8:
+  case $kindInt16:
+  case $kindInt32:
+  case $kindUint:
+  case $kindUint8:
+  case $kindUint16:
+  case $kindUint32:
+  case $kindUintptr:
+  case $kindString:
+  case $kindUnsafePointer:
     typ = function(v) { this.$val = v; };
     typ.prototype.$key = function() { return string + "$" + this.$val; };
     break;
 
-  case "Float32":
-  case "Float64":
+  case $kindFloat32:
+  case $kindFloat64:
     typ = function(v) { this.$val = v; };
     typ.prototype.$key = function() { return string + "$" + $floatKey(this.$val); };
     break;
 
-  case "Int64":
+  case $kindInt64:
     typ = function(high, low) {
       this.$high = (high + Math.floor(Math.ceil(low) / 4294967296)) >> 0;
       this.$low = low >>> 0;
@@ -446,7 +510,7 @@ var $newType = function(size, kind, string, name, pkgPath, constructor) {
     typ.prototype.$key = function() { return string + "$" + this.$high + "$" + this.$low; };
     break;
 
-  case "Uint64":
+  case $kindUint64:
     typ = function(high, low) {
       this.$high = (high + Math.floor(Math.ceil(low) / 4294967296)) >>> 0;
       this.$low = low >>> 0;
@@ -455,8 +519,8 @@ var $newType = function(size, kind, string, name, pkgPath, constructor) {
     typ.prototype.$key = function() { return string + "$" + this.$high + "$" + this.$low; };
     break;
 
-  case "Complex64":
-  case "Complex128":
+  case $kindComplex64:
+  case $kindComplex128:
     typ = function(real, imag) {
       this.$real = real;
       this.$imag = imag;
@@ -465,30 +529,29 @@ var $newType = function(size, kind, string, name, pkgPath, constructor) {
     typ.prototype.$key = function() { return string + "$" + this.$real + "$" + this.$imag; };
     break;
 
-  case "Array":
+  case $kindArray:
     typ = function(v) { this.$val = v; };
-    typ.Ptr = $newType(4, "Ptr", "*" + string, "", "", function(array) {
+    typ.ptr = $newType(4, $kindPtr, "*" + string, "", "", function(array) {
       this.$get = function() { return array; };
+      this.$set = function(v) { $copy(this, v, typ); };
       this.$val = array;
     });
     typ.init = function(elem, len) {
       typ.elem = elem;
       typ.len = len;
+      typ.comparable = elem.comparable;
       typ.prototype.$key = function() {
         return string + "$" + Array.prototype.join.call($mapArray(this.$val, function(e) {
           var key = e.$key ? e.$key() : String(e);
           return key.replace(/\\/g, "\\\\").replace(/\$/g, "\\$");
         }), "$");
       };
-      typ.extendReflectType = function(rt) {
-        rt.arrayType = new $reflect.arrayType.Ptr(rt, elem.reflectType(), undefined, len);
-      };
-      typ.Ptr.init(typ);
-      Object.defineProperty(typ.Ptr.nil, "nilCheck", { get: $throwNilPointerError });
+      typ.ptr.init(typ);
+      Object.defineProperty(typ.ptr.nil, "nilCheck", { get: $throwNilPointerError });
     };
     break;
 
-  case "Chan":
+  case $kindChan:
     typ = function(capacity) {
       this.$val = this;
       this.$capacity = capacity;
@@ -509,52 +572,37 @@ var $newType = function(size, kind, string, name, pkgPath, constructor) {
       typ.sendOnly = sendOnly;
       typ.recvOnly = recvOnly;
       typ.nil = new typ(0);
-      typ.nil.$sendQueue = typ.nil.$recvQueue = { length: 0, push: function() {}, shift: function() { return undefined; } };
-      typ.extendReflectType = function(rt) {
-        rt.chanType = new $reflect.chanType.Ptr(rt, elem.reflectType(), sendOnly ? $reflect.SendDir : (recvOnly ? $reflect.RecvDir : $reflect.BothDir));
-      };
+      typ.nil.$sendQueue = typ.nil.$recvQueue = { length: 0, push: function() {}, shift: function() { return undefined; }, indexOf: function() { return -1; } };
     };
     break;
 
-  case "Func":
+  case $kindFunc:
     typ = function(v) { this.$val = v; };
     typ.init = function(params, results, variadic) {
       typ.params = params;
       typ.results = results;
       typ.variadic = variadic;
-      typ.extendReflectType = function(rt) {
-        var typeSlice = ($sliceType($ptrType($reflect.rtype.Ptr)));
-        rt.funcType = new $reflect.funcType.Ptr(rt, variadic, new typeSlice($mapArray(params, function(p) { return p.reflectType(); })), new typeSlice($mapArray(results, function(p) { return p.reflectType(); })));
-      };
+      typ.comparable = false;
     };
     break;
 
-  case "Interface":
+  case $kindInterface:
     typ = { implementedBy: {}, missingMethodFor: {} };
     typ.init = function(methods) {
       typ.methods = methods;
-      typ.extendReflectType = function(rt) {
-        var imethods = $mapArray(methods, function(m) {
-          return new $reflect.imethod.Ptr($newStringPtr(m[1]), $newStringPtr(m[2]), m[3].reflectType());
-        });
-        var methodSlice = ($sliceType($ptrType($reflect.imethod.Ptr)));
-        rt.interfaceType = new $reflect.interfaceType.Ptr(rt, new methodSlice(imethods));
-      };
     };
     break;
 
-  case "Map":
+  case $kindMap:
     typ = function(v) { this.$val = v; };
     typ.init = function(key, elem) {
       typ.key = key;
       typ.elem = elem;
-      typ.extendReflectType = function(rt) {
-        rt.mapType = new $reflect.mapType.Ptr(rt, key.reflectType(), elem.reflectType(), undefined, undefined);
-      };
+      typ.comparable = false;
     };
     break;
 
-  case "Ptr":
+  case $kindPtr:
     typ = constructor || function(getter, setter, target) {
       this.$get = getter;
       this.$set = setter;
@@ -569,18 +617,15 @@ var $newType = function(size, kind, string, name, pkgPath, constructor) {
       return String(this.$id);
     };
     typ.init = function(elem) {
+      typ.elem = elem;
       typ.nil = new typ($throwNilPointerError, $throwNilPointerError);
-      typ.extendReflectType = function(rt) {
-        rt.ptrType = new $reflect.ptrType.Ptr(rt, elem.reflectType());
-      };
     };
     break;
 
-  case "Slice":
-    var nativeArray;
+  case $kindSlice:
     typ = function(array) {
-      if (array.constructor !== nativeArray) {
-        array = new nativeArray(array);
+      if (array.constructor !== typ.nativeArray) {
+        array = new typ.nativeArray(array);
       }
       this.$array = array;
       this.$offset = 0;
@@ -588,82 +633,67 @@ var $newType = function(size, kind, string, name, pkgPath, constructor) {
       this.$capacity = array.length;
       this.$val = this;
     };
-    typ.make = function(length, capacity) {
-      capacity = capacity || length;
-      var array = new nativeArray(capacity), i;
-      if (nativeArray === Array) {
-        for (i = 0; i < capacity; i++) {
-          array[i] = typ.elem.zero();
-        }
-      }
-      var slice = new typ(array);
-      slice.$length = length;
-      return slice;
-    };
     typ.init = function(elem) {
       typ.elem = elem;
-      nativeArray = $nativeArray(elem.kind);
+      typ.comparable = false;
+      typ.nativeArray = $nativeArray(elem.kind);
       typ.nil = new typ([]);
-      typ.extendReflectType = function(rt) {
-        rt.sliceType = new $reflect.sliceType.Ptr(rt, elem.reflectType());
-      };
     };
     break;
 
-  case "Struct":
+  case $kindStruct:
     typ = function(v) { this.$val = v; };
-    typ.prototype.$key = function() { $throwRuntimeError("hash of unhashable type " + string); };
-    typ.Ptr = $newType(4, "Ptr", "*" + string, "", "", constructor);
-    typ.Ptr.Struct = typ;
-    typ.Ptr.prototype.$get = function() { return this; };
+    typ.ptr = $newType(4, $kindPtr, "*" + string, "", "", constructor);
+    typ.ptr.elem = typ;
+    typ.ptr.prototype.$get = function() { return this; };
+    typ.ptr.prototype.$set = function(v) { $copy(this, v, typ); };
     typ.init = function(fields) {
-      var i;
       typ.fields = fields;
-      typ.Ptr.extendReflectType = function(rt) {
-        rt.ptrType = new $reflect.ptrType.Ptr(rt, typ.reflectType());
+      fields.forEach(function(f) {
+        if (!f.type.comparable) {
+          typ.comparable = false;
+        }
+      });
+      typ.prototype.$key = function() {
+        var val = this.$val;
+        return string + "$" + $mapArray(fields, function(f) {
+          var e = val[f.prop];
+          var key = e.$key ? e.$key() : String(e);
+          return key.replace(/\\/g, "\\\\").replace(/\$/g, "\\$");
+        }).join("$");
       };
       /* nil value */
-      typ.Ptr.nil = Object.create(constructor.prototype);
-      typ.Ptr.nil.$val = typ.Ptr.nil;
-      for (i = 0; i < fields.length; i++) {
-        var field = fields[i];
-        Object.defineProperty(typ.Ptr.nil, field[0], { get: $throwNilPointerError, set: $throwNilPointerError });
-      }
+      var properties = {};
+      fields.forEach(function(f) {
+        properties[f.prop] = { get: $throwNilPointerError, set: $throwNilPointerError };
+      });
+      typ.ptr.nil = Object.create(constructor.prototype, properties);
+      typ.ptr.nil.$val = typ.ptr.nil;
       /* methods for embedded fields */
-      for (i = 0; i < typ.methods.length; i++) {
-        var m = typ.methods[i];
-        if (m[4] != -1) {
-          (function(field, methodName) {
-            typ.prototype[methodName] = function() {
-              var v = this.$val[field[0]];
-              return v[methodName].apply(v, arguments);
-            };
-          })(fields[m[4]], m[0]);
-        }
-      }
-      for (i = 0; i < typ.Ptr.methods.length; i++) {
-        var m = typ.Ptr.methods[i];
-        if (m[4] != -1) {
-          (function(field, methodName) {
-            typ.Ptr.prototype[methodName] = function() {
-              var v = this[field[0]];
-              if (v.$val === undefined) {
-                v = new field[3](v);
-              }
-              return v[methodName].apply(v, arguments);
-            };
-          })(fields[m[4]], m[0]);
-        }
-      }
-      /* reflect type */
-      typ.extendReflectType = function(rt) {
-        var reflectFields = new Array(fields.length), i;
-        for (i = 0; i < fields.length; i++) {
-          var field = fields[i];
-          reflectFields[i] = new $reflect.structField.Ptr($newStringPtr(field[1]), $newStringPtr(field[2]), field[3].reflectType(), $newStringPtr(field[4]), i);
-        }
-        rt.structType = new $reflect.structType.Ptr(rt, new ($sliceType($reflect.structField.Ptr))(reflectFields));
+      var forwardMethod = function(target, m, f) {
+        if (target.prototype[m.prop] !== undefined) { return; }
+        target.prototype[m.prop] = function() {
+          var v = this.$val[f.prop];
+          if (f.type === $js.Object) {
+            v = new $js.container.ptr(v);
+          }
+          if (v.$val === undefined) {
+            v = new f.type(v);
+          }
+          return v[m.prop].apply(v, arguments);
+        };
       };
+      fields.forEach(function(f) {
+        if (f.name === "") {
+          f.type.methods.forEach(function(m) {
+            forwardMethod(typ, m, f);
+            forwardMethod(typ.ptr, m, f);
+          });
+          $ptrType(f.type).methods.forEach(function(m) {
+            forwardMethod(typ.ptr, m, f);
+          });
+        }
+      });
     };
     break;
 
@@ -671,131 +701,145 @@ var $newType = function(size, kind, string, name, pkgPath, constructor) {
     $panic(new $String("invalid kind: " + kind));
   }
 
-  switch(kind) {
-  case "Bool":
-  case "Map":
+  switch (kind) {
+  case $kindBool:
+  case $kindMap:
     typ.zero = function() { return false; };
     break;
 
-  case "Int":
-  case "Int8":
-  case "Int16":
-  case "Int32":
-  case "Uint":
-  case "Uint8" :
-  case "Uint16":
-  case "Uint32":
-  case "Uintptr":
-  case "UnsafePointer":
-  case "Float32":
-  case "Float64":
+  case $kindInt:
+  case $kindInt8:
+  case $kindInt16:
+  case $kindInt32:
+  case $kindUint:
+  case $kindUint8 :
+  case $kindUint16:
+  case $kindUint32:
+  case $kindUintptr:
+  case $kindUnsafePointer:
+  case $kindFloat32:
+  case $kindFloat64:
     typ.zero = function() { return 0; };
     break;
 
-  case "String":
+  case $kindString:
     typ.zero = function() { return ""; };
     break;
 
-  case "Int64":
-  case "Uint64":
-  case "Complex64":
-  case "Complex128":
+  case $kindInt64:
+  case $kindUint64:
+  case $kindComplex64:
+  case $kindComplex128:
     var zero = new typ(0, 0);
     typ.zero = function() { return zero; };
     break;
 
-  case "Chan":
-  case "Ptr":
-  case "Slice":
+  case $kindChan:
+  case $kindPtr:
+  case $kindSlice:
     typ.zero = function() { return typ.nil; };
     break;
 
-  case "Func":
+  case $kindFunc:
     typ.zero = function() { return $throwNilPointerError; };
     break;
 
-  case "Interface":
+  case $kindInterface:
     typ.zero = function() { return $ifaceNil; };
     break;
 
-  case "Array":
+  case $kindArray:
     typ.zero = function() {
       var arrayClass = $nativeArray(typ.elem.kind);
       if (arrayClass !== Array) {
         return new arrayClass(typ.len);
       }
-      var array = new Array(typ.len), i;
-      for (i = 0; i < typ.len; i++) {
+      var array = new Array(typ.len);
+      for (var i = 0; i < typ.len; i++) {
         array[i] = typ.elem.zero();
       }
       return array;
     };
     break;
 
-  case "Struct":
-    typ.zero = function() { return new typ.Ptr(); };
+  case $kindStruct:
+    typ.zero = function() { return new typ.ptr(); };
     break;
 
   default:
     $panic(new $String("invalid kind: " + kind));
   }
 
+  typ.size = size;
   typ.kind = kind;
   typ.string = string;
   typ.typeName = name;
-  typ.pkgPath = pkgPath;
+  typ.pkg = pkg;
   typ.methods = [];
+  typ.comparable = true;
   var rt = null;
-  typ.reflectType = function() {
-    if (rt === null) {
-      rt = new $reflect.rtype.Ptr(size, 0, 0, 0, 0, $reflect.kinds[kind], undefined, undefined, $newStringPtr(string), undefined, undefined);
-      rt.jsType = typ;
-
-      var methods = [];
-      if (typ.methods !== undefined) {
-        var i;
-        for (i = 0; i < typ.methods.length; i++) {
-          var m = typ.methods[i];
-          var t = m[3];
-          methods.push(new $reflect.method.Ptr($newStringPtr(m[1]), $newStringPtr(m[2]), t.reflectType(), $funcType([typ].concat(t.params), t.results, t.variadic).reflectType(), undefined, undefined));
-        }
-      }
-      if (name !== "" || methods.length !== 0) {
-        var methodSlice = ($sliceType($ptrType($reflect.method.Ptr)));
-        rt.uncommonType = new $reflect.uncommonType.Ptr($newStringPtr(name), $newStringPtr(pkgPath), new methodSlice(methods));
-        rt.uncommonType.jsType = typ;
-      }
-
-      if (typ.extendReflectType !== undefined) {
-        typ.extendReflectType(rt);
-      }
-    }
-    return rt;
-  };
   return typ;
 };
 
-var $Bool          = $newType( 1, "Bool",          "bool",           "bool",       "", null);
-var $Int           = $newType( 4, "Int",           "int",            "int",        "", null);
-var $Int8          = $newType( 1, "Int8",          "int8",           "int8",       "", null);
-var $Int16         = $newType( 2, "Int16",         "int16",          "int16",      "", null);
-var $Int32         = $newType( 4, "Int32",         "int32",          "int32",      "", null);
-var $Int64         = $newType( 8, "Int64",         "int64",          "int64",      "", null);
-var $Uint          = $newType( 4, "Uint",          "uint",           "uint",       "", null);
-var $Uint8         = $newType( 1, "Uint8",         "uint8",          "uint8",      "", null);
-var $Uint16        = $newType( 2, "Uint16",        "uint16",         "uint16",     "", null);
-var $Uint32        = $newType( 4, "Uint32",        "uint32",         "uint32",     "", null);
-var $Uint64        = $newType( 8, "Uint64",        "uint64",         "uint64",     "", null);
-var $Uintptr       = $newType( 4, "Uintptr",       "uintptr",        "uintptr",    "", null);
-var $Float32       = $newType( 4, "Float32",       "float32",        "float32",    "", null);
-var $Float64       = $newType( 8, "Float64",       "float64",        "float64",    "", null);
-var $Complex64     = $newType( 8, "Complex64",     "complex64",      "complex64",  "", null);
-var $Complex128    = $newType(16, "Complex128",    "complex128",     "complex128", "", null);
-var $String        = $newType( 8, "String",        "string",         "string",     "", null);
-var $UnsafePointer = $newType( 4, "UnsafePointer", "unsafe.Pointer", "Pointer",    "", null);
+var $Bool          = $newType( 1, $kindBool,          "bool",           "bool",       "", null);
+var $Int           = $newType( 4, $kindInt,           "int",            "int",        "", null);
+var $Int8          = $newType( 1, $kindInt8,          "int8",           "int8",       "", null);
+var $Int16         = $newType( 2, $kindInt16,         "int16",          "int16",      "", null);
+var $Int32         = $newType( 4, $kindInt32,         "int32",          "int32",      "", null);
+var $Int64         = $newType( 8, $kindInt64,         "int64",          "int64",      "", null);
+var $Uint          = $newType( 4, $kindUint,          "uint",           "uint",       "", null);
+var $Uint8         = $newType( 1, $kindUint8,         "uint8",          "uint8",      "", null);
+var $Uint16        = $newType( 2, $kindUint16,        "uint16",         "uint16",     "", null);
+var $Uint32        = $newType( 4, $kindUint32,        "uint32",         "uint32",     "", null);
+var $Uint64        = $newType( 8, $kindUint64,        "uint64",         "uint64",     "", null);
+var $Uintptr       = $newType( 4, $kindUintptr,       "uintptr",        "uintptr",    "", null);
+var $Float32       = $newType( 4, $kindFloat32,       "float32",        "float32",    "", null);
+var $Float64       = $newType( 8, $kindFloat64,       "float64",        "float64",    "", null);
+var $Complex64     = $newType( 8, $kindComplex64,     "complex64",      "complex64",  "", null);
+var $Complex128    = $newType(16, $kindComplex128,    "complex128",     "complex128", "", null);
+var $String        = $newType( 8, $kindString,        "string",         "string",     "", null);
+var $UnsafePointer = $newType( 4, $kindUnsafePointer, "unsafe.Pointer", "Pointer",    "", null);
+
+var $anonTypeInits = [];
+var $addAnonTypeInit = function(f) {
+  if ($anonTypeInits === null) {
+    f();
+    return;
+  }
+  $anonTypeInits.push(f);
+};
+var $initAnonTypes = function() {
+  $anonTypeInits.forEach(function(f) { f(); });
+  $anonTypeInits = null;
+};
 
 var $nativeArray = function(elemKind) {
-  return ({ Int: Int32Array, Int8: Int8Array, Int16: Int16Array, Int32: Int32Array, Uint: Uint32Array, Uint8: Uint8Array, Uint16: Uint16Array, Uint32: Uint32Array, Uintptr: Uint32Array, Float32: Float32Array, Float64: Float64Array })[elemKind] || Array;
+  switch (elemKind) {
+  case $kindInt:
+    return Int32Array;
+  case $kindInt8:
+    return Int8Array;
+  case $kindInt16:
+    return Int16Array;
+  case $kindInt32:
+    return Int32Array;
+  case $kindUint:
+    return Uint32Array;
+  case $kindUint8:
+    return Uint8Array;
+  case $kindUint16:
+    return Uint16Array;
+  case $kindUint32:
+    return Uint32Array;
+  case $kindUintptr:
+    return Uint32Array;
+  case $kindFloat32:
+    return Float32Array;
+  case $kindFloat64:
+    return Float64Array;
+  default:
+    return Array;
+  }
 };
 var $toNativeArray = function(elemKind, array) {
   var nativeArray = $nativeArray(elemKind);
@@ -809,9 +853,9 @@ var $arrayType = function(elem, len) {
   var string = "[" + len + "]" + elem.string;
   var typ = $arrayTypes[string];
   if (typ === undefined) {
-    typ = $newType(12, "Array", string, "", "", null);
-    typ.init(elem, len);
+    typ = $newType(12, $kindArray, string, "", "", null);
     $arrayTypes[string] = typ;
+    $addAnonTypeInit(function() { typ.init(elem, len); });
   }
   return typ;
 };
@@ -821,9 +865,9 @@ var $chanType = function(elem, sendOnly, recvOnly) {
   var field = sendOnly ? "SendChan" : (recvOnly ? "RecvChan" : "Chan");
   var typ = elem[field];
   if (typ === undefined) {
-    typ = $newType(4, "Chan", string, "", "", null);
-    typ.init(elem, sendOnly, recvOnly);
+    typ = $newType(4, $kindChan, string, "", "", null);
     elem[field] = typ;
+    $addAnonTypeInit(function() { typ.init(elem, sendOnly, recvOnly); });
   }
   return typ;
 };
@@ -842,9 +886,9 @@ var $funcType = function(params, results, variadic) {
   }
   var typ = $funcTypes[string];
   if (typ === undefined) {
-    typ = $newType(4, "Func", string, "", "", null);
-    typ.init(params, results, variadic);
+    typ = $newType(4, $kindFunc, string, "", "", null);
     $funcTypes[string] = typ;
+    $addAnonTypeInit(function() { typ.init(params, results, variadic); });
   }
   return typ;
 };
@@ -854,26 +898,26 @@ var $interfaceType = function(methods) {
   var string = "interface {}";
   if (methods.length !== 0) {
     string = "interface { " + $mapArray(methods, function(m) {
-      return (m[2] !== "" ? m[2] + "." : "") + m[1] + m[3].string.substr(4);
+      return (m.pkg !== "" ? m.pkg + "." : "") + m.name + m.type.string.substr(4);
     }).join("; ") + " }";
   }
   var typ = $interfaceTypes[string];
   if (typ === undefined) {
-    typ = $newType(8, "Interface", string, "", "", null);
-    typ.init(methods);
+    typ = $newType(8, $kindInterface, string, "", "", null);
     $interfaceTypes[string] = typ;
+    $addAnonTypeInit(function() { typ.init(methods); });
   }
   return typ;
 };
 var $emptyInterface = $interfaceType([]);
 var $ifaceNil = { $key: function() { return "nil"; } };
-var $error = $newType(8, "Interface", "error", "error", "", null);
-$error.init([["Error", "Error", "", $funcType([], [$String], false)]]);
+var $error = $newType(8, $kindInterface, "error", "error", "", null);
+$error.init([{prop: "Error", name: "Error", pkg: "", type: $funcType([], [$String], false)}]);
 
 var $Map = function() {};
 (function() {
-  var names = Object.getOwnPropertyNames(Object.prototype), i;
-  for (i = 0; i < names.length; i++) {
+  var names = Object.getOwnPropertyNames(Object.prototype);
+  for (var i = 0; i < names.length; i++) {
     $Map.prototype[names[i]] = undefined;
   }
 })();
@@ -882,9 +926,9 @@ var $mapType = function(key, elem) {
   var string = "map[" + key.string + "]" + elem.string;
   var typ = $mapTypes[string];
   if (typ === undefined) {
-    typ = $newType(4, "Map", string, "", "", null);
-    typ.init(key, elem);
+    typ = $newType(4, $kindMap, string, "", "", null);
     $mapTypes[string] = typ;
+    $addAnonTypeInit(function() { typ.init(key, elem); });
   }
   return typ;
 };
@@ -892,30 +936,17 @@ var $mapType = function(key, elem) {
 
 var $throwNilPointerError = function() { $throwRuntimeError("invalid memory address or nil pointer dereference"); };
 var $ptrType = function(elem) {
-  var typ = elem.Ptr;
+  var typ = elem.ptr;
   if (typ === undefined) {
-    typ = $newType(4, "Ptr", "*" + elem.string, "", "", null);
-    typ.init(elem);
-    elem.Ptr = typ;
+    typ = $newType(4, $kindPtr, "*" + elem.string, "", "", null);
+    elem.ptr = typ;
+    $addAnonTypeInit(function() { typ.init(elem); });
   }
   return typ;
 };
 
-var $stringPtrMap = new $Map();
-var $newStringPtr = function(str) {
-  if (str === undefined || str === "") {
-    return $ptrType($String).nil;
-  }
-  var ptr = $stringPtrMap[str];
-  if (ptr === undefined) {
-    ptr = new ($ptrType($String))(function() { return str; }, function(v) { str = v; });
-    $stringPtrMap[str] = ptr;
-  }
-  return ptr;
-};
-
 var $newDataPointer = function(data, constructor) {
-  if (constructor.Struct) {
+  if (constructor.elem.kind === $kindStruct) {
     return data;
   }
   return new constructor(function() { return data; }, function(v) { data = v; });
@@ -924,65 +955,70 @@ var $newDataPointer = function(data, constructor) {
 var $sliceType = function(elem) {
   var typ = elem.Slice;
   if (typ === undefined) {
-    typ = $newType(12, "Slice", "[]" + elem.string, "", "", null);
-    typ.init(elem);
+    typ = $newType(12, $kindSlice, "[]" + elem.string, "", "", null);
     elem.Slice = typ;
+    $addAnonTypeInit(function() { typ.init(elem); });
   }
   return typ;
+};
+var $makeSlice = function(typ, length, capacity) {
+  capacity = capacity || length;
+  var array = new typ.nativeArray(capacity);
+  if (typ.nativeArray === Array) {
+    for (var i = 0; i < capacity; i++) {
+      array[i] = typ.elem.zero();
+    }
+  }
+  var slice = new typ(array);
+  slice.$length = length;
+  return slice;
 };
 
 var $structTypes = {};
 var $structType = function(fields) {
   var string = "struct { " + $mapArray(fields, function(f) {
-    return f[1] + " " + f[3].string + (f[4] !== "" ? (" \"" + f[4].replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + "\"") : "");
+    return f.name + " " + f.type.string + (f.tag !== "" ? (" \"" + f.tag.replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + "\"") : "");
   }).join("; ") + " }";
   if (fields.length === 0) {
     string = "struct {}";
   }
   var typ = $structTypes[string];
   if (typ === undefined) {
-    typ = $newType(0, "Struct", string, "", "", function() {
+    typ = $newType(0, $kindStruct, string, "", "", function() {
       this.$val = this;
-      var i;
-      for (i = 0; i < fields.length; i++) {
-        var field = fields[i];
+      for (var i = 0; i < fields.length; i++) {
+        var f = fields[i];
         var arg = arguments[i];
-        this[field[0]] = arg !== undefined ? arg : field[3].zero();
+        this[f.prop] = arg !== undefined ? arg : f.type.zero();
       }
     });
-    /* collect methods for anonymous fields */
-    var i, j;
-    for (i = 0; i < fields.length; i++) {
-      var field = fields[i];
-      if (field[1] === "") {
-        var methods = field[3].methods;
-        for (j = 0; j < methods.length; j++) {
-          var m = methods[j].slice(0, 6).concat([i]);
-          typ.methods.push(m);
-          typ.Ptr.methods.push(m);
-        }
-        if (field[3].kind === "Struct") {
-          var methods = field[3].Ptr.methods;
-          for (j = 0; j < methods.length; j++) {
-            typ.Ptr.methods.push(methods[j].slice(0, 6).concat([i]));
-          }
-        }
-      }
-    }
-    typ.init(fields);
     $structTypes[string] = typ;
+    $anonTypeInits.push(function() {
+      /* collect methods for anonymous fields */
+      for (var i = 0; i < fields.length; i++) {
+        var f = fields[i];
+        if (f.name === "") {
+          f.type.methods.forEach(function(m) {
+            typ.methods.push(m);
+            typ.ptr.methods.push(m);
+          });
+          $ptrType(f.type).methods.forEach(function(m) {
+            typ.ptr.methods.push(m);
+          });
+        }
+      };
+      typ.init(fields);
+    });
   }
   return typ;
 };
 
 var $assertType = function(value, type, returnTuple) {
-  var isInterface = (type.kind === "Interface"), ok, missingMethod = "";
+  var isInterface = (type.kind === $kindInterface), ok, missingMethod = "";
   if (value === $ifaceNil) {
     ok = false;
   } else if (!isInterface) {
     ok = value.constructor === type;
-  } else if (type.string === "js.Object") {
-    ok = true;
   } else {
     var valueTypeString = value.constructor.string;
     ok = type.implementedBy[valueTypeString];
@@ -995,14 +1031,14 @@ var $assertType = function(value, type, returnTuple) {
         var found = false;
         for (var j = 0; j < valueMethods.length; j++) {
           var vm = valueMethods[j];
-          if (vm[1] === tm[1] && vm[2] === tm[2] && vm[3] === tm[3]) {
+          if (vm.name === tm.name && vm.pkg === tm.pkg && vm.type === tm.type) {
             found = true;
             break;
           }
         }
         if (!found) {
           ok = false;
-          type.missingMethodFor[valueTypeString] = tm[1];
+          type.missingMethodFor[valueTypeString] = tm.name;
           break;
         }
       }
@@ -1017,11 +1053,14 @@ var $assertType = function(value, type, returnTuple) {
     if (returnTuple) {
       return [type.zero(), false];
     }
-    $panic(new $packages["runtime"].TypeAssertionError.Ptr("", (value === $ifaceNil ? "" : value.constructor.string), type.string, missingMethod));
+    $panic(new $packages["runtime"].TypeAssertionError.ptr("", (value === $ifaceNil ? "" : value.constructor.string), type.string, missingMethod));
   }
 
   if (!isInterface) {
     value = value.$val;
+  }
+  if (type === $js.Object) {
+    value = value.Object;
   }
   return returnTuple ? [value, true] : value;
 };
@@ -1089,18 +1128,18 @@ var $shiftRightUint64 = function(x, y) {
 };
 
 var $mul64 = function(x, y) {
-  var high = 0, low = 0, i;
+  var high = 0, low = 0;
   if ((y.$low & 1) !== 0) {
     high = x.$high;
     low = x.$low;
   }
-  for (i = 1; i < 32; i++) {
+  for (var i = 1; i < 32; i++) {
     if ((y.$low & 1<<i) !== 0) {
       high += x.$high << i | x.$low >>> (32 - i);
       low += (x.$low << i) >>> 0;
     }
   }
-  for (i = 0; i < 32; i++) {
+  for (var i = 0; i < 32; i++) {
     if ((y.$high & 1<<i) !== 0) {
       high += x.$low << i;
     }
@@ -1139,13 +1178,13 @@ var $div64 = function(x, y, returnRemainder) {
     }
   }
 
-  var high = 0, low = 0, n = 0, i;
+  var high = 0, low = 0, n = 0;
   while (yHigh < 2147483648 && ((xHigh > yHigh) || (xHigh === yHigh && xLow > yLow))) {
     yHigh = (yHigh << 1 | yLow >>> 31) >>> 0;
     yLow = (yLow << 1) >>> 0;
     n++;
   }
-  for (i = 0; i <= n; i++) {
+  for (var i = 0; i <= n; i++) {
     high = high << 1 | low >>> 31;
     low = (low << 1) >>> 0;
     if ((xHigh > yHigh) || (xHigh === yHigh && xLow >= yLow)) {
@@ -1226,7 +1265,7 @@ var $callDeferred = function(deferred, jsErr) {
     var newErr = null;
     try {
       $deferFrames.push(deferred);
-      $panic(new $packages["github.com/gopherjs/gopherjs/js"].Error.Ptr(jsErr));
+      $panic(new $js.Error.ptr(jsErr));
     } catch (err) {
       newErr = err;
     }
@@ -1245,27 +1284,34 @@ var $callDeferred = function(deferred, jsErr) {
     $panicValue = localPanicValue;
   }
 
-  var call;
+  var call, localSkippedDeferFrames = 0;
   try {
     while (true) {
       if (deferred === null) {
-        deferred = $deferFrames[$deferFrames.length - 1 - $skippedDeferFrames];
+        deferred = $deferFrames[$deferFrames.length - 1 - localSkippedDeferFrames];
         if (deferred === undefined) {
+          var msg;
           if (localPanicValue.constructor === $String) {
-            throw new Error(localPanicValue.$val);
+            msg = localPanicValue.$val;
           } else if (localPanicValue.Error !== undefined) {
-            throw new Error(localPanicValue.Error());
+            msg = localPanicValue.Error();
           } else if (localPanicValue.String !== undefined) {
-            throw new Error(localPanicValue.String());
+            msg = localPanicValue.String();
           } else {
-            throw new Error(localPanicValue);
+            msg = localPanicValue;
           }
+          var e = new Error(msg);
+          if (localPanicValue.Stack !== undefined) {
+            e.stack = localPanicValue.Stack();
+            e.stack = msg + e.stack.substr(e.stack.indexOf("\n"));
+          }
+          throw e;
         }
       }
       var call = deferred.pop();
       if (call === undefined) {
         if (localPanicValue !== undefined) {
-          $skippedDeferFrames++;
+          localSkippedDeferFrames++;
           deferred = null;
           continue;
         }
@@ -1281,6 +1327,7 @@ var $callDeferred = function(deferred, jsErr) {
       }
     }
   } finally {
+    $skippedDeferFrames += localSkippedDeferFrames;
     if ($curGoroutine.asleep) {
       deferred.push(call);
       $jumpToDefer = true;
@@ -1307,19 +1354,22 @@ var $recover = function() {
   $panicStackDepth = null;
   return $panicValue;
 };
-var $nonblockingCall = function() {
-  $panic(new $packages["runtime"].NotSupportedError.Ptr("non-blocking call to blocking function (mark call with \"//gopherjs:blocking\" to fix)"));
-};
 var $throw = function(err) { throw err; };
 var $throwRuntimeError; /* set by package "runtime" */
+
+var $BLOCKING = new Object();
+var $nonblockingCall = function() {
+  $panic(new $packages["runtime"].NotSupportedError.ptr("non-blocking call to blocking function, see https://github.com/gopherjs/gopherjs#goroutines"));
+};
 
 var $dummyGoroutine = { asleep: false, exit: false, panicStack: [] };
 var $curGoroutine = $dummyGoroutine, $totalGoroutines = 0, $awakeGoroutines = 0, $checkForDeadlock = true;
 var $go = function(fun, args, direct) {
   $totalGoroutines++;
   $awakeGoroutines++;
-  args.push(true);
+  args.push($BLOCKING);
   var goroutine = function() {
+    var rescheduled = false;
     try {
       $curGoroutine = goroutine;
       $skippedDeferFrames = 0;
@@ -1329,6 +1379,7 @@ var $go = function(fun, args, direct) {
         fun = r;
         args = [];
         $schedule(goroutine, direct);
+        rescheduled = true;
         return;
       }
       goroutine.exit = true;
@@ -1339,14 +1390,14 @@ var $go = function(fun, args, direct) {
       }
     } finally {
       $curGoroutine = $dummyGoroutine;
-      if (goroutine.exit) { /* also set by runtime.Goexit() */
+      if (goroutine.exit && !rescheduled) { /* also set by runtime.Goexit() */
         $totalGoroutines--;
         goroutine.asleep = true;
       }
-      if (goroutine.asleep) {
+      if (goroutine.asleep && !rescheduled) {
         $awakeGoroutines--;
         if ($awakeGoroutines === 0 && $totalGoroutines !== 0 && $checkForDeadlock) {
-          $panic(new $String("fatal error: all goroutines are asleep - deadlock!"));
+          console.error("fatal error: all goroutines are asleep - deadlock!");
         }
       }
     }
@@ -1471,9 +1522,9 @@ var $close = function(chan) {
   }
 };
 var $select = function(comms) {
-  var ready = [], i;
+  var ready = [];
   var selection = -1;
-  for (i = 0; i < comms.length; i++) {
+  for (var i = 0; i < comms.length; i++) {
     var comm = comms[i];
     var chan = comm[0];
     switch (comm.length) {
@@ -1515,7 +1566,7 @@ var $select = function(comms) {
   var entries = [];
   var thisGoroutine = $curGoroutine;
   var removeFromQueues = function() {
-    for (i = 0; i < entries.length; i++) {
+    for (var i = 0; i < entries.length; i++) {
       var entry = entries[i];
       var queue = entry[0];
       var index = queue.indexOf(entry[1]);
@@ -1524,7 +1575,7 @@ var $select = function(comms) {
       }
     }
   };
-  for (i = 0; i < comms.length; i++) {
+  for (var i = 0; i < comms.length; i++) {
     (function(i) {
       var comm = comms[i];
       switch (comm.length) {
@@ -1566,23 +1617,25 @@ var $select = function(comms) {
   return f;
 };
 
+var $js;
+
 var $needsExternalization = function(t) {
   switch (t.kind) {
-    case "Bool":
-    case "Int":
-    case "Int8":
-    case "Int16":
-    case "Int32":
-    case "Uint":
-    case "Uint8":
-    case "Uint16":
-    case "Uint32":
-    case "Uintptr":
-    case "Float32":
-    case "Float64":
+    case $kindBool:
+    case $kindInt:
+    case $kindInt8:
+    case $kindInt16:
+    case $kindInt32:
+    case $kindUint:
+    case $kindUint8:
+    case $kindUint16:
+    case $kindUint32:
+    case $kindUintptr:
+    case $kindFloat32:
+    case $kindFloat64:
       return false;
-    case "Interface":
-      return t !== $packages["github.com/gopherjs/gopherjs/js"].Object;
+    case $kindInterface:
+      return t !== $js.Object;
     default:
       return true;
   }
@@ -1590,127 +1643,144 @@ var $needsExternalization = function(t) {
 
 var $externalize = function(v, t) {
   switch (t.kind) {
-  case "Bool":
-  case "Int":
-  case "Int8":
-  case "Int16":
-  case "Int32":
-  case "Uint":
-  case "Uint8":
-  case "Uint16":
-  case "Uint32":
-  case "Uintptr":
-  case "Float32":
-  case "Float64":
+  case $kindBool:
+  case $kindInt:
+  case $kindInt8:
+  case $kindInt16:
+  case $kindInt32:
+  case $kindUint:
+  case $kindUint8:
+  case $kindUint16:
+  case $kindUint32:
+  case $kindUintptr:
+  case $kindFloat32:
+  case $kindFloat64:
     return v;
-  case "Int64":
-  case "Uint64":
+  case $kindInt64:
+  case $kindUint64:
     return $flatten64(v);
-  case "Array":
+  case $kindArray:
     if ($needsExternalization(t.elem)) {
       return $mapArray(v, function(e) { return $externalize(e, t.elem); });
     }
     return v;
-  case "Func":
+  case $kindFunc:
     if (v === $throwNilPointerError) {
       return null;
     }
     if (v.$externalizeWrapper === undefined) {
       $checkForDeadlock = false;
       var convert = false;
-      var i;
-      for (i = 0; i < t.params.length; i++) {
-        convert = convert || (t.params[i] !== $packages["github.com/gopherjs/gopherjs/js"].Object);
+      for (var i = 0; i < t.params.length; i++) {
+        convert = convert || (t.params[i] !== $js.Object);
       }
-      for (i = 0; i < t.results.length; i++) {
+      for (var i = 0; i < t.results.length; i++) {
         convert = convert || $needsExternalization(t.results[i]);
       }
-      if (!convert) {
-        return v;
-      }
-      v.$externalizeWrapper = function() {
-        var args = [], i;
-        for (i = 0; i < t.params.length; i++) {
-          if (t.variadic && i === t.params.length - 1) {
-            var vt = t.params[i].elem, varargs = [], j;
-            for (j = i; j < arguments.length; j++) {
-              varargs.push($internalize(arguments[j], vt));
+      v.$externalizeWrapper = v;
+      if (convert) {
+        v.$externalizeWrapper = function() {
+          var args = [];
+          for (var i = 0; i < t.params.length; i++) {
+            if (t.variadic && i === t.params.length - 1) {
+              var vt = t.params[i].elem, varargs = [];
+              for (var j = i; j < arguments.length; j++) {
+                varargs.push($internalize(arguments[j], vt));
+              }
+              args.push(new (t.params[i])(varargs));
+              break;
             }
-            args.push(new (t.params[i])(varargs));
-            break;
+            args.push($internalize(arguments[i], t.params[i]));
           }
-          args.push($internalize(arguments[i], t.params[i]));
-        }
-        var result = v.apply(this, args);
-        switch (t.results.length) {
-        case 0:
-          return;
-        case 1:
-          return $externalize(result, t.results[0]);
-        default:
-          for (i = 0; i < t.results.length; i++) {
-            result[i] = $externalize(result[i], t.results[i]);
+          var result = v.apply(this, args);
+          switch (t.results.length) {
+          case 0:
+            return;
+          case 1:
+            return $externalize(result, t.results[0]);
+          default:
+            for (var i = 0; i < t.results.length; i++) {
+              result[i] = $externalize(result[i], t.results[i]);
+            }
+            return result;
           }
-          return result;
-        }
-      };
+        };
+      }
     }
     return v.$externalizeWrapper;
-  case "Interface":
+  case $kindInterface:
+    if (t === $js.Object) {
+      return v;
+    }
     if (v === $ifaceNil) {
       return null;
     }
-    if (t === $packages["github.com/gopherjs/gopherjs/js"].Object || v.constructor.kind === undefined) {
-      return v;
-    }
     return $externalize(v.$val, v.constructor);
-  case "Map":
+  case $kindMap:
     var m = {};
-    var keys = $keys(v), i;
-    for (i = 0; i < keys.length; i++) {
+    var keys = $keys(v);
+    for (var i = 0; i < keys.length; i++) {
       var entry = v[keys[i]];
       m[$externalize(entry.k, t.key)] = $externalize(entry.v, t.elem);
     }
     return m;
-  case "Ptr":
-    var o = {}, i;
-    for (i = 0; i < t.methods.length; i++) {
-      var m = t.methods[i];
-      if (m[2] !== "") { /* not exported */
-        continue;
-      }
-      (function(m) {
-        o[m[1]] = $externalize(function() {
-          return v[m[0]].apply(v, arguments);
-        }, m[3]);
-      })(m);
-    }
-    return o;
-  case "Slice":
+  case $kindPtr:
+    return $externalize(v.$get(), t.elem);
+  case $kindSlice:
     if ($needsExternalization(t.elem)) {
       return $mapArray($sliceToArray(v), function(e) { return $externalize(e, t.elem); });
     }
     return $sliceToArray(v);
-  case "String":
-    var s = "", r, i, j = 0;
-    for (i = 0; i < v.length; i += r[1], j++) {
+  case $kindString:
+    if (v.search(/^[\x00-\x7F]*$/) !== -1) {
+      return v;
+    }
+    var s = "", r;
+    for (var i = 0; i < v.length; i += r[1]) {
       r = $decodeRune(v, i);
       s += String.fromCharCode(r[0]);
     }
     return s;
-  case "Struct":
+  case $kindStruct:
     var timePkg = $packages["time"];
-    if (timePkg && v.constructor === timePkg.Time.Ptr) {
+    if (timePkg && v.constructor === timePkg.Time.ptr) {
       var milli = $div64(v.UnixNano(), new $Int64(0, 1000000));
       return new Date($flatten64(milli));
     }
-    var o = {}, i;
-    for (i = 0; i < t.fields.length; i++) {
+
+    var searchJsObject = function(v, t) {
+      if (t === $js.Object) {
+        return v;
+      }
+      if (t.kind === $kindPtr) {
+        var o = searchJsObject(v.$get(), t.elem);
+        if (o !== undefined) {
+          return o;
+        }
+      }
+      if (t.kind === $kindStruct) {
+        for (var i = 0; i < t.fields.length; i++) {
+          var f = t.fields[i];
+          var o = searchJsObject(v[f.prop], f.type);
+          if (o !== undefined) {
+            return o;
+          }
+        }
+      }
+      return undefined;
+    };
+    var o = searchJsObject(v, t);
+    if (o !== undefined) {
+      return o;
+    }
+
+    o = {};
+    for (var i = 0; i < t.fields.length; i++) {
       var f = t.fields[i];
-      if (f[2] !== "") { /* not exported */
+      if (f.pkg !== "") { /* not exported */
         continue;
       }
-      o[f[1]] = $externalize(v[f[0]], f[3]);
+      o[f.name] = $externalize(v[f.prop], f.type);
     }
     return o;
   }
@@ -1719,43 +1789,43 @@ var $externalize = function(v, t) {
 
 var $internalize = function(v, t, recv) {
   switch (t.kind) {
-  case "Bool":
+  case $kindBool:
     return !!v;
-  case "Int":
+  case $kindInt:
     return parseInt(v);
-  case "Int8":
+  case $kindInt8:
     return parseInt(v) << 24 >> 24;
-  case "Int16":
+  case $kindInt16:
     return parseInt(v) << 16 >> 16;
-  case "Int32":
+  case $kindInt32:
     return parseInt(v) >> 0;
-  case "Uint":
+  case $kindUint:
     return parseInt(v);
-  case "Uint8":
+  case $kindUint8:
     return parseInt(v) << 24 >>> 24;
-  case "Uint16":
+  case $kindUint16:
     return parseInt(v) << 16 >>> 16;
-  case "Uint32":
-  case "Uintptr":
+  case $kindUint32:
+  case $kindUintptr:
     return parseInt(v) >>> 0;
-  case "Int64":
-  case "Uint64":
+  case $kindInt64:
+  case $kindUint64:
     return new t(0, v);
-  case "Float32":
-  case "Float64":
+  case $kindFloat32:
+  case $kindFloat64:
     return parseFloat(v);
-  case "Array":
+  case $kindArray:
     if (v.length !== t.len) {
       $throwRuntimeError("got array with wrong size from JavaScript native");
     }
     return $mapArray(v, function(e) { return $internalize(e, t.elem); });
-  case "Func":
+  case $kindFunc:
     return function() {
-      var args = [], i;
-      for (i = 0; i < t.params.length; i++) {
+      var args = [];
+      for (var i = 0; i < t.params.length; i++) {
         if (t.variadic && i === t.params.length - 1) {
-          var vt = t.params[i].elem, varargs = arguments[i], j;
-          for (j = 0; j < varargs.$length; j++) {
+          var vt = t.params[i].elem, varargs = arguments[i];
+          for (var j = 0; j < varargs.$length; j++) {
             args.push($externalize(varargs.$array[varargs.$offset + j], vt));
           }
           break;
@@ -1769,15 +1839,18 @@ var $internalize = function(v, t, recv) {
       case 1:
         return $internalize(result, t.results[0]);
       default:
-        for (i = 0; i < t.results.length; i++) {
+        for (var i = 0; i < t.results.length; i++) {
           result[i] = $internalize(result[i], t.results[i]);
         }
         return result;
       }
     };
-  case "Interface":
-    if (t === $packages["github.com/gopherjs/gopherjs/js"].Object) {
+  case $kindInterface:
+    if (t === $js.Object) {
       return v;
+    }
+    if (t.methods.length !== 0) {
+      $panic(new $String("cannot internalize " + t.string));
     }
     if (v === null) {
       return $ifaceNil;
@@ -1809,7 +1882,7 @@ var $internalize = function(v, t, recv) {
         return new timePkg.Time(timePkg.Unix(new $Int64(0, 0), new $Int64(0, v.getTime() * 1000000)));
       }
     case Function:
-      var funcType = $funcType([$sliceType($emptyInterface)], [$packages["github.com/gopherjs/gopherjs/js"].Object], true);
+      var funcType = $funcType([$sliceType($emptyInterface)], [$js.Object], true);
       return new funcType($internalize(v, funcType));
     case Number:
       return new $Float64(parseFloat(v));
@@ -1817,106 +1890,234 @@ var $internalize = function(v, t, recv) {
       return new $String($internalize(v, $String));
     default:
       if ($global.Node && v instanceof $global.Node) {
-        return v;
+        return new $js.container.ptr(v);
       }
       var mapType = $mapType($String, $emptyInterface);
       return new mapType($internalize(v, mapType));
     }
-  case "Map":
+  case $kindMap:
     var m = new $Map();
-    var keys = $keys(v), i;
-    for (i = 0; i < keys.length; i++) {
+    var keys = $keys(v);
+    for (var i = 0; i < keys.length; i++) {
       var key = $internalize(keys[i], t.key);
       m[key.$key ? key.$key() : key] = { k: key, v: $internalize(v[keys[i]], t.elem) };
     }
     return m;
-  case "Slice":
+  case $kindPtr:
+    if (t.elem.kind === $kindStruct) {
+      return $internalize(v, t.elem);
+    }
+  case $kindSlice:
     return new t($mapArray(v, function(e) { return $internalize(e, t.elem); }));
-  case "String":
+  case $kindString:
     v = String(v);
-    var s = "", i;
-    for (i = 0; i < v.length; i++) {
+    if (v.search(/^[\x00-\x7F]*$/) !== -1) {
+      return v;
+    }
+    var s = "";
+    for (var i = 0; i < v.length; i++) {
       s += $encodeRune(v.charCodeAt(i));
     }
     return s;
-  default:
-    $panic(new $String("cannot internalize " + t.string));
+  case $kindStruct:
+    var searchJsObject = function(v, t) {
+      if (t === $js.Object) {
+        return v;
+      }
+      if (t.kind === $kindPtr && t.elem.kind === $kindStruct) {
+        var o = searchJsObject(v, t.elem);
+        if (o !== undefined) {
+          return o;
+        }
+      }
+      if (t.kind === $kindStruct) {
+        for (var i = 0; i < t.fields.length; i++) {
+          var f = t.fields[i];
+          var o = searchJsObject(v, f.type);
+          if (o !== undefined) {
+            var n = new t.ptr();
+            n[f.prop] = o;
+            return n;
+          }
+        }
+      }
+      return undefined;
+    };
+    var o = searchJsObject(v, t);
+    if (o !== undefined) {
+      return o;
+    }
   }
+  $panic(new $String("cannot internalize " + t.string));
 };
 
 $packages["github.com/gopherjs/gopherjs/js"] = (function() {
-	var $pkg = {}, Object, Error, init;
-	Object = $pkg.Object = $newType(8, "Interface", "js.Object", "Object", "github.com/gopherjs/gopherjs/js", null);
-	Error = $pkg.Error = $newType(0, "Struct", "js.Error", "Error", "github.com/gopherjs/gopherjs/js", function(Object_) {
+	var $pkg = {}, Object, container, Error, sliceType$1, ptrType, ptrType$1, init;
+	Object = $pkg.Object = $newType(8, $kindInterface, "js.Object", "Object", "github.com/gopherjs/gopherjs/js", null);
+	container = $pkg.container = $newType(0, $kindStruct, "js.container", "container", "github.com/gopherjs/gopherjs/js", function(Object_) {
 		this.$val = this;
-		this.Object = Object_ !== undefined ? Object_ : $ifaceNil;
+		this.Object = Object_ !== undefined ? Object_ : null;
 	});
-	Error.Ptr.prototype.Error = function() {
+	Error = $pkg.Error = $newType(0, $kindStruct, "js.Error", "Error", "github.com/gopherjs/gopherjs/js", function(Object_) {
+		this.$val = this;
+		this.Object = Object_ !== undefined ? Object_ : null;
+	});
+	sliceType$1 = $sliceType($emptyInterface);
+	ptrType = $ptrType(container);
+	ptrType$1 = $ptrType(Error);
+	container.ptr.prototype.Get = function(key) {
+		var c;
+		c = this;
+		return c.Object[$externalize(key, $String)];
+	};
+	container.prototype.Get = function(key) { return this.$val.Get(key); };
+	container.ptr.prototype.Set = function(key, value) {
+		var c;
+		c = this;
+		c.Object[$externalize(key, $String)] = $externalize(value, $emptyInterface);
+	};
+	container.prototype.Set = function(key, value) { return this.$val.Set(key, value); };
+	container.ptr.prototype.Delete = function(key) {
+		var c;
+		c = this;
+		delete c.Object[$externalize(key, $String)];
+	};
+	container.prototype.Delete = function(key) { return this.$val.Delete(key); };
+	container.ptr.prototype.Length = function() {
+		var c;
+		c = this;
+		return $parseInt(c.Object.length);
+	};
+	container.prototype.Length = function() { return this.$val.Length(); };
+	container.ptr.prototype.Index = function(i) {
+		var c;
+		c = this;
+		return c.Object[i];
+	};
+	container.prototype.Index = function(i) { return this.$val.Index(i); };
+	container.ptr.prototype.SetIndex = function(i, value) {
+		var c;
+		c = this;
+		c.Object[i] = $externalize(value, $emptyInterface);
+	};
+	container.prototype.SetIndex = function(i, value) { return this.$val.SetIndex(i, value); };
+	container.ptr.prototype.Call = function(name, args) {
+		var c, obj;
+		c = this;
+		return (obj = c.Object, obj[$externalize(name, $String)].apply(obj, $externalize(args, sliceType$1)));
+	};
+	container.prototype.Call = function(name, args) { return this.$val.Call(name, args); };
+	container.ptr.prototype.Invoke = function(args) {
+		var c;
+		c = this;
+		return c.Object.apply(undefined, $externalize(args, sliceType$1));
+	};
+	container.prototype.Invoke = function(args) { return this.$val.Invoke(args); };
+	container.ptr.prototype.New = function(args) {
+		var c;
+		c = this;
+		return new ($global.Function.prototype.bind.apply(c.Object, [undefined].concat($externalize(args, sliceType$1))));
+	};
+	container.prototype.New = function(args) { return this.$val.New(args); };
+	container.ptr.prototype.Bool = function() {
+		var c;
+		c = this;
+		return !!(c.Object);
+	};
+	container.prototype.Bool = function() { return this.$val.Bool(); };
+	container.ptr.prototype.String = function() {
+		var c;
+		c = this;
+		return $internalize(c.Object, $String);
+	};
+	container.prototype.String = function() { return this.$val.String(); };
+	container.ptr.prototype.Int = function() {
+		var c;
+		c = this;
+		return $parseInt(c.Object) >> 0;
+	};
+	container.prototype.Int = function() { return this.$val.Int(); };
+	container.ptr.prototype.Int64 = function() {
+		var c;
+		c = this;
+		return $internalize(c.Object, $Int64);
+	};
+	container.prototype.Int64 = function() { return this.$val.Int64(); };
+	container.ptr.prototype.Uint64 = function() {
+		var c;
+		c = this;
+		return $internalize(c.Object, $Uint64);
+	};
+	container.prototype.Uint64 = function() { return this.$val.Uint64(); };
+	container.ptr.prototype.Float = function() {
+		var c;
+		c = this;
+		return $parseFloat(c.Object);
+	};
+	container.prototype.Float = function() { return this.$val.Float(); };
+	container.ptr.prototype.Interface = function() {
+		var c;
+		c = this;
+		return $internalize(c.Object, $emptyInterface);
+	};
+	container.prototype.Interface = function() { return this.$val.Interface(); };
+	container.ptr.prototype.Unsafe = function() {
+		var c;
+		c = this;
+		return c.Object;
+	};
+	container.prototype.Unsafe = function() { return this.$val.Unsafe(); };
+	Error.ptr.prototype.Error = function() {
 		var err;
 		err = this;
 		return "JavaScript error: " + $internalize(err.Object.message, $String);
 	};
 	Error.prototype.Error = function() { return this.$val.Error(); };
-	init = function() {
-		var e;
-		e = new Error.Ptr($ifaceNil);
+	Error.ptr.prototype.Stack = function() {
+		var err;
+		err = this;
+		return $internalize(err.Object.stack, $String);
 	};
+	Error.prototype.Stack = function() { return this.$val.Stack(); };
+	init = function() {
+		var _tmp, _tmp$1, c, e;
+		c = new container.ptr(null);
+		e = new Error.ptr(null);
+		
+	};
+	ptrType.methods = [{prop: "Bool", name: "Bool", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Call", name: "Call", pkg: "", type: $funcType([$String, sliceType$1], [Object], true)}, {prop: "Delete", name: "Delete", pkg: "", type: $funcType([$String], [], false)}, {prop: "Float", name: "Float", pkg: "", type: $funcType([], [$Float64], false)}, {prop: "Get", name: "Get", pkg: "", type: $funcType([$String], [Object], false)}, {prop: "Index", name: "Index", pkg: "", type: $funcType([$Int], [Object], false)}, {prop: "Int", name: "Int", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Int64", name: "Int64", pkg: "", type: $funcType([], [$Int64], false)}, {prop: "Interface", name: "Interface", pkg: "", type: $funcType([], [$emptyInterface], false)}, {prop: "Invoke", name: "Invoke", pkg: "", type: $funcType([sliceType$1], [Object], true)}, {prop: "Length", name: "Length", pkg: "", type: $funcType([], [$Int], false)}, {prop: "New", name: "New", pkg: "", type: $funcType([sliceType$1], [Object], true)}, {prop: "Set", name: "Set", pkg: "", type: $funcType([$String, $emptyInterface], [], false)}, {prop: "SetIndex", name: "SetIndex", pkg: "", type: $funcType([$Int, $emptyInterface], [], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "Uint64", name: "Uint64", pkg: "", type: $funcType([], [$Uint64], false)}, {prop: "Unsafe", name: "Unsafe", pkg: "", type: $funcType([], [$Uintptr], false)}];
+	Error.methods = [{prop: "Bool", name: "Bool", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Call", name: "Call", pkg: "", type: $funcType([$String, sliceType$1], [Object], true)}, {prop: "Delete", name: "Delete", pkg: "", type: $funcType([$String], [], false)}, {prop: "Float", name: "Float", pkg: "", type: $funcType([], [$Float64], false)}, {prop: "Get", name: "Get", pkg: "", type: $funcType([$String], [Object], false)}, {prop: "Index", name: "Index", pkg: "", type: $funcType([$Int], [Object], false)}, {prop: "Int", name: "Int", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Int64", name: "Int64", pkg: "", type: $funcType([], [$Int64], false)}, {prop: "Interface", name: "Interface", pkg: "", type: $funcType([], [$emptyInterface], false)}, {prop: "Invoke", name: "Invoke", pkg: "", type: $funcType([sliceType$1], [Object], true)}, {prop: "Length", name: "Length", pkg: "", type: $funcType([], [$Int], false)}, {prop: "New", name: "New", pkg: "", type: $funcType([sliceType$1], [Object], true)}, {prop: "Set", name: "Set", pkg: "", type: $funcType([$String, $emptyInterface], [], false)}, {prop: "SetIndex", name: "SetIndex", pkg: "", type: $funcType([$Int, $emptyInterface], [], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "Uint64", name: "Uint64", pkg: "", type: $funcType([], [$Uint64], false)}, {prop: "Unsafe", name: "Unsafe", pkg: "", type: $funcType([], [$Uintptr], false)}];
+	ptrType$1.methods = [{prop: "Bool", name: "Bool", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Call", name: "Call", pkg: "", type: $funcType([$String, sliceType$1], [Object], true)}, {prop: "Delete", name: "Delete", pkg: "", type: $funcType([$String], [], false)}, {prop: "Error", name: "Error", pkg: "", type: $funcType([], [$String], false)}, {prop: "Float", name: "Float", pkg: "", type: $funcType([], [$Float64], false)}, {prop: "Get", name: "Get", pkg: "", type: $funcType([$String], [Object], false)}, {prop: "Index", name: "Index", pkg: "", type: $funcType([$Int], [Object], false)}, {prop: "Int", name: "Int", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Int64", name: "Int64", pkg: "", type: $funcType([], [$Int64], false)}, {prop: "Interface", name: "Interface", pkg: "", type: $funcType([], [$emptyInterface], false)}, {prop: "Invoke", name: "Invoke", pkg: "", type: $funcType([sliceType$1], [Object], true)}, {prop: "Length", name: "Length", pkg: "", type: $funcType([], [$Int], false)}, {prop: "New", name: "New", pkg: "", type: $funcType([sliceType$1], [Object], true)}, {prop: "Set", name: "Set", pkg: "", type: $funcType([$String, $emptyInterface], [], false)}, {prop: "SetIndex", name: "SetIndex", pkg: "", type: $funcType([$Int, $emptyInterface], [], false)}, {prop: "Stack", name: "Stack", pkg: "", type: $funcType([], [$String], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "Uint64", name: "Uint64", pkg: "", type: $funcType([], [$Uint64], false)}, {prop: "Unsafe", name: "Unsafe", pkg: "", type: $funcType([], [$Uintptr], false)}];
+	Object.init([{prop: "Bool", name: "Bool", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Call", name: "Call", pkg: "", type: $funcType([$String, sliceType$1], [Object], true)}, {prop: "Delete", name: "Delete", pkg: "", type: $funcType([$String], [], false)}, {prop: "Float", name: "Float", pkg: "", type: $funcType([], [$Float64], false)}, {prop: "Get", name: "Get", pkg: "", type: $funcType([$String], [Object], false)}, {prop: "Index", name: "Index", pkg: "", type: $funcType([$Int], [Object], false)}, {prop: "Int", name: "Int", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Int64", name: "Int64", pkg: "", type: $funcType([], [$Int64], false)}, {prop: "Interface", name: "Interface", pkg: "", type: $funcType([], [$emptyInterface], false)}, {prop: "Invoke", name: "Invoke", pkg: "", type: $funcType([sliceType$1], [Object], true)}, {prop: "Length", name: "Length", pkg: "", type: $funcType([], [$Int], false)}, {prop: "New", name: "New", pkg: "", type: $funcType([sliceType$1], [Object], true)}, {prop: "Set", name: "Set", pkg: "", type: $funcType([$String, $emptyInterface], [], false)}, {prop: "SetIndex", name: "SetIndex", pkg: "", type: $funcType([$Int, $emptyInterface], [], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "Uint64", name: "Uint64", pkg: "", type: $funcType([], [$Uint64], false)}, {prop: "Unsafe", name: "Unsafe", pkg: "", type: $funcType([], [$Uintptr], false)}]);
+	container.init([{prop: "Object", name: "", pkg: "", type: Object, tag: ""}]);
+	Error.init([{prop: "Object", name: "", pkg: "", type: Object, tag: ""}]);
 	$pkg.$init = function() {
-		Object.init([["Bool", "Bool", "", $funcType([], [$Bool], false)], ["Call", "Call", "", $funcType([$String, ($sliceType($emptyInterface))], [Object], true)], ["Delete", "Delete", "", $funcType([$String], [], false)], ["Float", "Float", "", $funcType([], [$Float64], false)], ["Get", "Get", "", $funcType([$String], [Object], false)], ["Index", "Index", "", $funcType([$Int], [Object], false)], ["Int", "Int", "", $funcType([], [$Int], false)], ["Int64", "Int64", "", $funcType([], [$Int64], false)], ["Interface", "Interface", "", $funcType([], [$emptyInterface], false)], ["Invoke", "Invoke", "", $funcType([($sliceType($emptyInterface))], [Object], true)], ["IsNull", "IsNull", "", $funcType([], [$Bool], false)], ["IsUndefined", "IsUndefined", "", $funcType([], [$Bool], false)], ["Length", "Length", "", $funcType([], [$Int], false)], ["New", "New", "", $funcType([($sliceType($emptyInterface))], [Object], true)], ["Set", "Set", "", $funcType([$String, $emptyInterface], [], false)], ["SetIndex", "SetIndex", "", $funcType([$Int, $emptyInterface], [], false)], ["Str", "Str", "", $funcType([], [$String], false)], ["Uint64", "Uint64", "", $funcType([], [$Uint64], false)], ["Unsafe", "Unsafe", "", $funcType([], [$Uintptr], false)]]);
-		Error.methods = [["Bool", "Bool", "", $funcType([], [$Bool], false), 0], ["Call", "Call", "", $funcType([$String, ($sliceType($emptyInterface))], [Object], true), 0], ["Delete", "Delete", "", $funcType([$String], [], false), 0], ["Float", "Float", "", $funcType([], [$Float64], false), 0], ["Get", "Get", "", $funcType([$String], [Object], false), 0], ["Index", "Index", "", $funcType([$Int], [Object], false), 0], ["Int", "Int", "", $funcType([], [$Int], false), 0], ["Int64", "Int64", "", $funcType([], [$Int64], false), 0], ["Interface", "Interface", "", $funcType([], [$emptyInterface], false), 0], ["Invoke", "Invoke", "", $funcType([($sliceType($emptyInterface))], [Object], true), 0], ["IsNull", "IsNull", "", $funcType([], [$Bool], false), 0], ["IsUndefined", "IsUndefined", "", $funcType([], [$Bool], false), 0], ["Length", "Length", "", $funcType([], [$Int], false), 0], ["New", "New", "", $funcType([($sliceType($emptyInterface))], [Object], true), 0], ["Set", "Set", "", $funcType([$String, $emptyInterface], [], false), 0], ["SetIndex", "SetIndex", "", $funcType([$Int, $emptyInterface], [], false), 0], ["Str", "Str", "", $funcType([], [$String], false), 0], ["Uint64", "Uint64", "", $funcType([], [$Uint64], false), 0], ["Unsafe", "Unsafe", "", $funcType([], [$Uintptr], false), 0]];
-		($ptrType(Error)).methods = [["Bool", "Bool", "", $funcType([], [$Bool], false), 0], ["Call", "Call", "", $funcType([$String, ($sliceType($emptyInterface))], [Object], true), 0], ["Delete", "Delete", "", $funcType([$String], [], false), 0], ["Error", "Error", "", $funcType([], [$String], false), -1], ["Float", "Float", "", $funcType([], [$Float64], false), 0], ["Get", "Get", "", $funcType([$String], [Object], false), 0], ["Index", "Index", "", $funcType([$Int], [Object], false), 0], ["Int", "Int", "", $funcType([], [$Int], false), 0], ["Int64", "Int64", "", $funcType([], [$Int64], false), 0], ["Interface", "Interface", "", $funcType([], [$emptyInterface], false), 0], ["Invoke", "Invoke", "", $funcType([($sliceType($emptyInterface))], [Object], true), 0], ["IsNull", "IsNull", "", $funcType([], [$Bool], false), 0], ["IsUndefined", "IsUndefined", "", $funcType([], [$Bool], false), 0], ["Length", "Length", "", $funcType([], [$Int], false), 0], ["New", "New", "", $funcType([($sliceType($emptyInterface))], [Object], true), 0], ["Set", "Set", "", $funcType([$String, $emptyInterface], [], false), 0], ["SetIndex", "SetIndex", "", $funcType([$Int, $emptyInterface], [], false), 0], ["Str", "Str", "", $funcType([], [$String], false), 0], ["Uint64", "Uint64", "", $funcType([], [$Uint64], false), 0], ["Unsafe", "Unsafe", "", $funcType([], [$Uintptr], false), 0]];
-		Error.init([["Object", "", "", Object, ""]]);
+		$pkg.$init = function() {};
+		/* */ var $r, $s = 0; var $init_js = function() { while (true) { switch ($s) { case 0:
 		init();
+		/* */ } return; } }; $init_js.$blocking = true; return $init_js;
 	};
 	return $pkg;
 })();
 $packages["runtime"] = (function() {
-	var $pkg = {}, js = $packages["github.com/gopherjs/gopherjs/js"], NotSupportedError, TypeAssertionError, errorString, MemStats, sizeof_C_MStats, init, init$1;
-	NotSupportedError = $pkg.NotSupportedError = $newType(0, "Struct", "runtime.NotSupportedError", "NotSupportedError", "runtime", function(Feature_) {
+	var $pkg = {}, js, NotSupportedError, TypeAssertionError, errorString, ptrType$5, ptrType$6, ptrType$7, init;
+	js = $packages["github.com/gopherjs/gopherjs/js"];
+	NotSupportedError = $pkg.NotSupportedError = $newType(0, $kindStruct, "runtime.NotSupportedError", "NotSupportedError", "runtime", function(Feature_) {
 		this.$val = this;
 		this.Feature = Feature_ !== undefined ? Feature_ : "";
 	});
-	TypeAssertionError = $pkg.TypeAssertionError = $newType(0, "Struct", "runtime.TypeAssertionError", "TypeAssertionError", "runtime", function(interfaceString_, concreteString_, assertedString_, missingMethod_) {
+	TypeAssertionError = $pkg.TypeAssertionError = $newType(0, $kindStruct, "runtime.TypeAssertionError", "TypeAssertionError", "runtime", function(interfaceString_, concreteString_, assertedString_, missingMethod_) {
 		this.$val = this;
 		this.interfaceString = interfaceString_ !== undefined ? interfaceString_ : "";
 		this.concreteString = concreteString_ !== undefined ? concreteString_ : "";
 		this.assertedString = assertedString_ !== undefined ? assertedString_ : "";
 		this.missingMethod = missingMethod_ !== undefined ? missingMethod_ : "";
 	});
-	errorString = $pkg.errorString = $newType(8, "String", "runtime.errorString", "errorString", "runtime", null);
-	MemStats = $pkg.MemStats = $newType(0, "Struct", "runtime.MemStats", "MemStats", "runtime", function(Alloc_, TotalAlloc_, Sys_, Lookups_, Mallocs_, Frees_, HeapAlloc_, HeapSys_, HeapIdle_, HeapInuse_, HeapReleased_, HeapObjects_, StackInuse_, StackSys_, MSpanInuse_, MSpanSys_, MCacheInuse_, MCacheSys_, BuckHashSys_, GCSys_, OtherSys_, NextGC_, LastGC_, PauseTotalNs_, PauseNs_, NumGC_, EnableGC_, DebugGC_, BySize_) {
-		this.$val = this;
-		this.Alloc = Alloc_ !== undefined ? Alloc_ : new $Uint64(0, 0);
-		this.TotalAlloc = TotalAlloc_ !== undefined ? TotalAlloc_ : new $Uint64(0, 0);
-		this.Sys = Sys_ !== undefined ? Sys_ : new $Uint64(0, 0);
-		this.Lookups = Lookups_ !== undefined ? Lookups_ : new $Uint64(0, 0);
-		this.Mallocs = Mallocs_ !== undefined ? Mallocs_ : new $Uint64(0, 0);
-		this.Frees = Frees_ !== undefined ? Frees_ : new $Uint64(0, 0);
-		this.HeapAlloc = HeapAlloc_ !== undefined ? HeapAlloc_ : new $Uint64(0, 0);
-		this.HeapSys = HeapSys_ !== undefined ? HeapSys_ : new $Uint64(0, 0);
-		this.HeapIdle = HeapIdle_ !== undefined ? HeapIdle_ : new $Uint64(0, 0);
-		this.HeapInuse = HeapInuse_ !== undefined ? HeapInuse_ : new $Uint64(0, 0);
-		this.HeapReleased = HeapReleased_ !== undefined ? HeapReleased_ : new $Uint64(0, 0);
-		this.HeapObjects = HeapObjects_ !== undefined ? HeapObjects_ : new $Uint64(0, 0);
-		this.StackInuse = StackInuse_ !== undefined ? StackInuse_ : new $Uint64(0, 0);
-		this.StackSys = StackSys_ !== undefined ? StackSys_ : new $Uint64(0, 0);
-		this.MSpanInuse = MSpanInuse_ !== undefined ? MSpanInuse_ : new $Uint64(0, 0);
-		this.MSpanSys = MSpanSys_ !== undefined ? MSpanSys_ : new $Uint64(0, 0);
-		this.MCacheInuse = MCacheInuse_ !== undefined ? MCacheInuse_ : new $Uint64(0, 0);
-		this.MCacheSys = MCacheSys_ !== undefined ? MCacheSys_ : new $Uint64(0, 0);
-		this.BuckHashSys = BuckHashSys_ !== undefined ? BuckHashSys_ : new $Uint64(0, 0);
-		this.GCSys = GCSys_ !== undefined ? GCSys_ : new $Uint64(0, 0);
-		this.OtherSys = OtherSys_ !== undefined ? OtherSys_ : new $Uint64(0, 0);
-		this.NextGC = NextGC_ !== undefined ? NextGC_ : new $Uint64(0, 0);
-		this.LastGC = LastGC_ !== undefined ? LastGC_ : new $Uint64(0, 0);
-		this.PauseTotalNs = PauseTotalNs_ !== undefined ? PauseTotalNs_ : new $Uint64(0, 0);
-		this.PauseNs = PauseNs_ !== undefined ? PauseNs_ : ($arrayType($Uint64, 256)).zero();
-		this.NumGC = NumGC_ !== undefined ? NumGC_ : 0;
-		this.EnableGC = EnableGC_ !== undefined ? EnableGC_ : false;
-		this.DebugGC = DebugGC_ !== undefined ? DebugGC_ : false;
-		this.BySize = BySize_ !== undefined ? BySize_ : ($arrayType(($structType([["Size", "Size", "", $Uint32, ""], ["Mallocs", "Mallocs", "", $Uint64, ""], ["Frees", "Frees", "", $Uint64, ""]])), 61)).zero();
-	});
-	NotSupportedError.Ptr.prototype.Error = function() {
+	errorString = $pkg.errorString = $newType(8, $kindString, "runtime.errorString", "errorString", "runtime", null);
+	ptrType$5 = $ptrType(NotSupportedError);
+	ptrType$6 = $ptrType(TypeAssertionError);
+	ptrType$7 = $ptrType(errorString);
+	NotSupportedError.ptr.prototype.Error = function() {
 		var err;
 		err = this;
 		return "not supported by GopherJS: " + err.Feature;
@@ -1924,17 +2125,18 @@ $packages["runtime"] = (function() {
 	NotSupportedError.prototype.Error = function() { return this.$val.Error(); };
 	init = function() {
 		var e;
-		$throwRuntimeError = $externalize((function(msg) {
+		$js = $packages[$externalize("github.com/gopherjs/gopherjs/js", $String)];
+		$throwRuntimeError = (function(msg) {
 			$panic(new errorString(msg));
-		}), ($funcType([$String], [], false)));
+		});
 		e = $ifaceNil;
-		e = new TypeAssertionError.Ptr("", "", "", "");
-		e = new NotSupportedError.Ptr("");
+		e = new TypeAssertionError.ptr("", "", "", "");
+		e = new NotSupportedError.ptr("");
 	};
-	TypeAssertionError.Ptr.prototype.RuntimeError = function() {
+	TypeAssertionError.ptr.prototype.RuntimeError = function() {
 	};
 	TypeAssertionError.prototype.RuntimeError = function() { return this.$val.RuntimeError(); };
-	TypeAssertionError.Ptr.prototype.Error = function() {
+	TypeAssertionError.ptr.prototype.Error = function() {
 		var e, inter;
 		e = this;
 		inter = e.interfaceString;
@@ -1952,57 +2154,51 @@ $packages["runtime"] = (function() {
 	TypeAssertionError.prototype.Error = function() { return this.$val.Error(); };
 	errorString.prototype.RuntimeError = function() {
 		var e;
-		e = this.$val !== undefined ? this.$val : this;
+		e = this.$val;
 	};
 	$ptrType(errorString).prototype.RuntimeError = function() { return new errorString(this.$get()).RuntimeError(); };
 	errorString.prototype.Error = function() {
 		var e;
-		e = this.$val !== undefined ? this.$val : this;
+		e = this.$val;
 		return "runtime error: " + e;
 	};
 	$ptrType(errorString).prototype.Error = function() { return new errorString(this.$get()).Error(); };
-	init$1 = function() {
-		var memStats;
-		memStats = new MemStats.Ptr(); $copy(memStats, new MemStats.Ptr(), MemStats);
-		if (!((sizeof_C_MStats === 3712))) {
-			console.log(sizeof_C_MStats, 3712);
-			$panic(new $String("MStats vs MemStatsType size mismatch"));
-		}
-	};
+	ptrType$5.methods = [{prop: "Error", name: "Error", pkg: "", type: $funcType([], [$String], false)}];
+	ptrType$6.methods = [{prop: "Error", name: "Error", pkg: "", type: $funcType([], [$String], false)}, {prop: "RuntimeError", name: "RuntimeError", pkg: "", type: $funcType([], [], false)}];
+	errorString.methods = [{prop: "Error", name: "Error", pkg: "", type: $funcType([], [$String], false)}, {prop: "RuntimeError", name: "RuntimeError", pkg: "", type: $funcType([], [], false)}];
+	ptrType$7.methods = [{prop: "Error", name: "Error", pkg: "", type: $funcType([], [$String], false)}, {prop: "RuntimeError", name: "RuntimeError", pkg: "", type: $funcType([], [], false)}];
+	NotSupportedError.init([{prop: "Feature", name: "Feature", pkg: "", type: $String, tag: ""}]);
+	TypeAssertionError.init([{prop: "interfaceString", name: "interfaceString", pkg: "runtime", type: $String, tag: ""}, {prop: "concreteString", name: "concreteString", pkg: "runtime", type: $String, tag: ""}, {prop: "assertedString", name: "assertedString", pkg: "runtime", type: $String, tag: ""}, {prop: "missingMethod", name: "missingMethod", pkg: "runtime", type: $String, tag: ""}]);
 	$pkg.$init = function() {
-		($ptrType(NotSupportedError)).methods = [["Error", "Error", "", $funcType([], [$String], false), -1]];
-		NotSupportedError.init([["Feature", "Feature", "", $String, ""]]);
-		($ptrType(TypeAssertionError)).methods = [["Error", "Error", "", $funcType([], [$String], false), -1], ["RuntimeError", "RuntimeError", "", $funcType([], [], false), -1]];
-		TypeAssertionError.init([["interfaceString", "interfaceString", "runtime", $String, ""], ["concreteString", "concreteString", "runtime", $String, ""], ["assertedString", "assertedString", "runtime", $String, ""], ["missingMethod", "missingMethod", "runtime", $String, ""]]);
-		errorString.methods = [["Error", "Error", "", $funcType([], [$String], false), -1], ["RuntimeError", "RuntimeError", "", $funcType([], [], false), -1]];
-		($ptrType(errorString)).methods = [["Error", "Error", "", $funcType([], [$String], false), -1], ["RuntimeError", "RuntimeError", "", $funcType([], [], false), -1]];
-		MemStats.init([["Alloc", "Alloc", "", $Uint64, ""], ["TotalAlloc", "TotalAlloc", "", $Uint64, ""], ["Sys", "Sys", "", $Uint64, ""], ["Lookups", "Lookups", "", $Uint64, ""], ["Mallocs", "Mallocs", "", $Uint64, ""], ["Frees", "Frees", "", $Uint64, ""], ["HeapAlloc", "HeapAlloc", "", $Uint64, ""], ["HeapSys", "HeapSys", "", $Uint64, ""], ["HeapIdle", "HeapIdle", "", $Uint64, ""], ["HeapInuse", "HeapInuse", "", $Uint64, ""], ["HeapReleased", "HeapReleased", "", $Uint64, ""], ["HeapObjects", "HeapObjects", "", $Uint64, ""], ["StackInuse", "StackInuse", "", $Uint64, ""], ["StackSys", "StackSys", "", $Uint64, ""], ["MSpanInuse", "MSpanInuse", "", $Uint64, ""], ["MSpanSys", "MSpanSys", "", $Uint64, ""], ["MCacheInuse", "MCacheInuse", "", $Uint64, ""], ["MCacheSys", "MCacheSys", "", $Uint64, ""], ["BuckHashSys", "BuckHashSys", "", $Uint64, ""], ["GCSys", "GCSys", "", $Uint64, ""], ["OtherSys", "OtherSys", "", $Uint64, ""], ["NextGC", "NextGC", "", $Uint64, ""], ["LastGC", "LastGC", "", $Uint64, ""], ["PauseTotalNs", "PauseTotalNs", "", $Uint64, ""], ["PauseNs", "PauseNs", "", ($arrayType($Uint64, 256)), ""], ["NumGC", "NumGC", "", $Uint32, ""], ["EnableGC", "EnableGC", "", $Bool, ""], ["DebugGC", "DebugGC", "", $Bool, ""], ["BySize", "BySize", "", ($arrayType(($structType([["Size", "Size", "", $Uint32, ""], ["Mallocs", "Mallocs", "", $Uint64, ""], ["Frees", "Frees", "", $Uint64, ""]])), 61)), ""]]);
-		sizeof_C_MStats = 3712;
+		$pkg.$init = function() {};
+		/* */ var $r, $s = 0; var $init_runtime = function() { while (true) { switch ($s) { case 0:
+		$r = js.$init($BLOCKING); /* */ $s = 1; case 1: if ($r && $r.$blocking) { $r = $r(); }
 		init();
-		init$1();
+		/* */ } return; } }; $init_runtime.$blocking = true; return $init_runtime;
 	};
 	return $pkg;
 })();
 $packages["github.com/gopherjs/jquery"] = (function() {
-	var $pkg = {}, js = $packages["github.com/gopherjs/gopherjs/js"], JQuery, Event, JQueryCoordinates, NewJQuery;
-	JQuery = $pkg.JQuery = $newType(0, "Struct", "jquery.JQuery", "JQuery", "github.com/gopherjs/jquery", function(o_, Jquery_, Selector_, Length_, Context_) {
+	var $pkg = {}, js, JQuery, Event, JQueryCoordinates, sliceType, funcType$1, mapType, sliceType$1, funcType$2, funcType$3, sliceType$2, ptrType, ptrType$1, NewJQuery;
+	js = $packages["github.com/gopherjs/gopherjs/js"];
+	JQuery = $pkg.JQuery = $newType(0, $kindStruct, "jquery.JQuery", "JQuery", "github.com/gopherjs/jquery", function(o_, Jquery_, Selector_, Length_, Context_) {
 		this.$val = this;
-		this.o = o_ !== undefined ? o_ : $ifaceNil;
+		this.o = o_ !== undefined ? o_ : null;
 		this.Jquery = Jquery_ !== undefined ? Jquery_ : "";
 		this.Selector = Selector_ !== undefined ? Selector_ : "";
 		this.Length = Length_ !== undefined ? Length_ : 0;
 		this.Context = Context_ !== undefined ? Context_ : "";
 	});
-	Event = $pkg.Event = $newType(0, "Struct", "jquery.Event", "Event", "github.com/gopherjs/jquery", function(Object_, KeyCode_, Target_, CurrentTarget_, DelegateTarget_, RelatedTarget_, Data_, Result_, Which_, Namespace_, MetaKey_, PageX_, PageY_, Type_) {
+	Event = $pkg.Event = $newType(0, $kindStruct, "jquery.Event", "Event", "github.com/gopherjs/jquery", function(Object_, KeyCode_, Target_, CurrentTarget_, DelegateTarget_, RelatedTarget_, Data_, Result_, Which_, Namespace_, MetaKey_, PageX_, PageY_, Type_) {
 		this.$val = this;
-		this.Object = Object_ !== undefined ? Object_ : $ifaceNil;
+		this.Object = Object_ !== undefined ? Object_ : null;
 		this.KeyCode = KeyCode_ !== undefined ? KeyCode_ : 0;
-		this.Target = Target_ !== undefined ? Target_ : $ifaceNil;
-		this.CurrentTarget = CurrentTarget_ !== undefined ? CurrentTarget_ : $ifaceNil;
-		this.DelegateTarget = DelegateTarget_ !== undefined ? DelegateTarget_ : $ifaceNil;
-		this.RelatedTarget = RelatedTarget_ !== undefined ? RelatedTarget_ : $ifaceNil;
-		this.Data = Data_ !== undefined ? Data_ : $ifaceNil;
-		this.Result = Result_ !== undefined ? Result_ : $ifaceNil;
+		this.Target = Target_ !== undefined ? Target_ : null;
+		this.CurrentTarget = CurrentTarget_ !== undefined ? CurrentTarget_ : null;
+		this.DelegateTarget = DelegateTarget_ !== undefined ? DelegateTarget_ : null;
+		this.RelatedTarget = RelatedTarget_ !== undefined ? RelatedTarget_ : null;
+		this.Data = Data_ !== undefined ? Data_ : null;
+		this.Result = Result_ !== undefined ? Result_ : null;
 		this.Which = Which_ !== undefined ? Which_ : 0;
 		this.Namespace = Namespace_ !== undefined ? Namespace_ : "";
 		this.MetaKey = MetaKey_ !== undefined ? MetaKey_ : false;
@@ -2010,169 +2206,177 @@ $packages["github.com/gopherjs/jquery"] = (function() {
 		this.PageY = PageY_ !== undefined ? PageY_ : 0;
 		this.Type = Type_ !== undefined ? Type_ : "";
 	});
-	JQueryCoordinates = $pkg.JQueryCoordinates = $newType(0, "Struct", "jquery.JQueryCoordinates", "JQueryCoordinates", "github.com/gopherjs/jquery", function(Left_, Top_) {
+	JQueryCoordinates = $pkg.JQueryCoordinates = $newType(0, $kindStruct, "jquery.JQueryCoordinates", "JQueryCoordinates", "github.com/gopherjs/jquery", function(Left_, Top_) {
 		this.$val = this;
 		this.Left = Left_ !== undefined ? Left_ : 0;
 		this.Top = Top_ !== undefined ? Top_ : 0;
 	});
-	Event.Ptr.prototype.PreventDefault = function() {
+	sliceType = $sliceType($emptyInterface);
+	funcType$1 = $funcType([$Int, $emptyInterface], [], false);
+	mapType = $mapType($String, $emptyInterface);
+	sliceType$1 = $sliceType($String);
+	funcType$2 = $funcType([$Int, $String], [$String], false);
+	funcType$3 = $funcType([], [], false);
+	sliceType$2 = $sliceType($Bool);
+	ptrType = $ptrType(JQuery);
+	ptrType$1 = $ptrType(Event);
+	Event.ptr.prototype.PreventDefault = function() {
 		var event;
 		event = this;
 		event.Object.preventDefault();
 	};
 	Event.prototype.PreventDefault = function() { return this.$val.PreventDefault(); };
-	Event.Ptr.prototype.IsDefaultPrevented = function() {
+	Event.ptr.prototype.IsDefaultPrevented = function() {
 		var event;
 		event = this;
 		return !!(event.Object.isDefaultPrevented());
 	};
 	Event.prototype.IsDefaultPrevented = function() { return this.$val.IsDefaultPrevented(); };
-	Event.Ptr.prototype.IsImmediatePropogationStopped = function() {
+	Event.ptr.prototype.IsImmediatePropogationStopped = function() {
 		var event;
 		event = this;
 		return !!(event.Object.isImmediatePropogationStopped());
 	};
 	Event.prototype.IsImmediatePropogationStopped = function() { return this.$val.IsImmediatePropogationStopped(); };
-	Event.Ptr.prototype.IsPropagationStopped = function() {
+	Event.ptr.prototype.IsPropagationStopped = function() {
 		var event;
 		event = this;
 		return !!(event.Object.isPropagationStopped());
 	};
 	Event.prototype.IsPropagationStopped = function() { return this.$val.IsPropagationStopped(); };
-	Event.Ptr.prototype.StopImmediatePropagation = function() {
+	Event.ptr.prototype.StopImmediatePropagation = function() {
 		var event;
 		event = this;
 		event.Object.stopImmediatePropagation();
 	};
 	Event.prototype.StopImmediatePropagation = function() { return this.$val.StopImmediatePropagation(); };
-	Event.Ptr.prototype.StopPropagation = function() {
+	Event.ptr.prototype.StopPropagation = function() {
 		var event;
 		event = this;
 		event.Object.stopPropagation();
 	};
 	Event.prototype.StopPropagation = function() { return this.$val.StopPropagation(); };
 	NewJQuery = $pkg.NewJQuery = function(args) {
-		return new JQuery.Ptr(new ($global.Function.prototype.bind.apply($global.jQuery, [undefined].concat($externalize(args, ($sliceType($emptyInterface)))))), "", "", 0, "");
+		return new JQuery.ptr(new ($global.Function.prototype.bind.apply($global.jQuery, [undefined].concat($externalize(args, sliceType)))), "", "", 0, "");
 	};
-	JQuery.Ptr.prototype.Each = function(fn) {
+	JQuery.ptr.prototype.Each = function(fn) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = j.o.each($externalize((function(idx, elem) {
-			fn(idx, $clone(NewJQuery(new ($sliceType($emptyInterface))([elem])), JQuery));
-		}), ($funcType([$Int, js.Object], [], false))));
+		j = $clone(this, JQuery);
+		j.o = j.o.each($externalize(fn, funcType$1));
 		return j;
 	};
 	JQuery.prototype.Each = function(fn) { return this.$val.Each(fn); };
-	JQuery.Ptr.prototype.Underlying = function() {
+	JQuery.ptr.prototype.Underlying = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return j.o;
 	};
 	JQuery.prototype.Underlying = function() { return this.$val.Underlying(); };
-	JQuery.Ptr.prototype.Get = function(i) {
+	JQuery.ptr.prototype.Get = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return (obj = j.o, obj.get.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		return (obj = j.o, obj.get.apply(obj, $externalize(i, sliceType)));
 	};
 	JQuery.prototype.Get = function(i) { return this.$val.Get(i); };
-	JQuery.Ptr.prototype.Append = function(i) {
-		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom2args("append", i);
+	JQuery.ptr.prototype.Append = function(i) {
+		var j, obj;
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.append.apply(obj, $externalize(i, sliceType)));
+		return j;
 	};
 	JQuery.prototype.Append = function(i) { return this.$val.Append(i); };
-	JQuery.Ptr.prototype.Empty = function() {
+	JQuery.ptr.prototype.Empty = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.empty();
 		return j;
 	};
 	JQuery.prototype.Empty = function() { return this.$val.Empty(); };
-	JQuery.Ptr.prototype.Detach = function(i) {
+	JQuery.ptr.prototype.Detach = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.detach.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.detach.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Detach = function(i) { return this.$val.Detach(i); };
-	JQuery.Ptr.prototype.Eq = function(idx) {
+	JQuery.ptr.prototype.Eq = function(idx) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.eq(idx);
 		return j;
 	};
 	JQuery.prototype.Eq = function(idx) { return this.$val.Eq(idx); };
-	JQuery.Ptr.prototype.FadeIn = function(i) {
+	JQuery.ptr.prototype.FadeIn = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.fadeIn.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.fadeIn.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.FadeIn = function(i) { return this.$val.FadeIn(i); };
-	JQuery.Ptr.prototype.Delay = function(i) {
+	JQuery.ptr.prototype.Delay = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.delay.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.delay.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Delay = function(i) { return this.$val.Delay(i); };
-	JQuery.Ptr.prototype.ToArray = function() {
+	JQuery.ptr.prototype.ToArray = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return $assertType($internalize(j.o.toArray(), $emptyInterface), ($sliceType($emptyInterface)));
+		j = $clone(this, JQuery);
+		return $assertType($internalize(j.o.toArray(), $emptyInterface), sliceType);
 	};
 	JQuery.prototype.ToArray = function() { return this.$val.ToArray(); };
-	JQuery.Ptr.prototype.Remove = function(i) {
+	JQuery.ptr.prototype.Remove = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.remove.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.remove.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Remove = function(i) { return this.$val.Remove(i); };
-	JQuery.Ptr.prototype.Stop = function(i) {
+	JQuery.ptr.prototype.Stop = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.stop.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.stop.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Stop = function(i) { return this.$val.Stop(i); };
-	JQuery.Ptr.prototype.AddBack = function(i) {
+	JQuery.ptr.prototype.AddBack = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.addBack.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.addBack.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.AddBack = function(i) { return this.$val.AddBack(i); };
-	JQuery.Ptr.prototype.Css = function(name) {
+	JQuery.ptr.prototype.Css = function(name) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $internalize(j.o.css($externalize(name, $String)), $String);
 	};
 	JQuery.prototype.Css = function(name) { return this.$val.Css(name); };
-	JQuery.Ptr.prototype.CssArray = function(arr) {
+	JQuery.ptr.prototype.CssArray = function(arr) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return $assertType($internalize(j.o.css($externalize(arr, ($sliceType($String)))), $emptyInterface), ($mapType($String, $emptyInterface)));
+		j = $clone(this, JQuery);
+		return $assertType($internalize(j.o.css($externalize(arr, sliceType$1)), $emptyInterface), mapType);
 	};
 	JQuery.prototype.CssArray = function(arr) { return this.$val.CssArray(arr); };
-	JQuery.Ptr.prototype.SetCss = function(i) {
+	JQuery.ptr.prototype.SetCss = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.css.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.css.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.SetCss = function(i) { return this.$val.SetCss(i); };
-	JQuery.Ptr.prototype.Text = function() {
+	JQuery.ptr.prototype.Text = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $internalize(j.o.text(), $String);
 	};
 	JQuery.prototype.Text = function() { return this.$val.Text(); };
-	JQuery.Ptr.prototype.SetText = function(i) {
-		var j, _ref;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+	JQuery.ptr.prototype.SetText = function(i) {
+		var _ref, j;
+		j = $clone(this, JQuery);
 		_ref = i;
-		if ($assertType(_ref, ($funcType([$Int, $String], [$String], false)), true)[1] || $assertType(_ref, $String, true)[1]) {
+		if ($assertType(_ref, funcType$2, true)[1] || $assertType(_ref, $String, true)[1]) {
 		} else {
 			console.log("SetText Argument should be 'string' or 'func(int, string) string'");
 		}
@@ -2180,42 +2384,42 @@ $packages["github.com/gopherjs/jquery"] = (function() {
 		return j;
 	};
 	JQuery.prototype.SetText = function(i) { return this.$val.SetText(i); };
-	JQuery.Ptr.prototype.Val = function() {
+	JQuery.ptr.prototype.Val = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $internalize(j.o.val(), $String);
 	};
 	JQuery.prototype.Val = function() { return this.$val.Val(); };
-	JQuery.Ptr.prototype.SetVal = function(i) {
+	JQuery.ptr.prototype.SetVal = function(i) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o.val($externalize(i, $emptyInterface));
 		return j;
 	};
 	JQuery.prototype.SetVal = function(i) { return this.$val.SetVal(i); };
-	JQuery.Ptr.prototype.Prop = function(property) {
+	JQuery.ptr.prototype.Prop = function(property) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $internalize(j.o.prop($externalize(property, $String)), $emptyInterface);
 	};
 	JQuery.prototype.Prop = function(property) { return this.$val.Prop(property); };
-	JQuery.Ptr.prototype.SetProp = function(i) {
+	JQuery.ptr.prototype.SetProp = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.prop.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.prop.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.SetProp = function(i) { return this.$val.SetProp(i); };
-	JQuery.Ptr.prototype.RemoveProp = function(property) {
+	JQuery.ptr.prototype.RemoveProp = function(property) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.removeProp($externalize(property, $String));
 		return j;
 	};
 	JQuery.prototype.RemoveProp = function(property) { return this.$val.RemoveProp(property); };
-	JQuery.Ptr.prototype.Attr = function(property) {
-		var j, attr;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+	JQuery.ptr.prototype.Attr = function(property) {
+		var attr, j;
+		j = $clone(this, JQuery);
 		attr = j.o.attr($externalize(property, $String));
 		if (attr === undefined) {
 			return "";
@@ -2223,31 +2427,31 @@ $packages["github.com/gopherjs/jquery"] = (function() {
 		return $internalize(attr, $String);
 	};
 	JQuery.prototype.Attr = function(property) { return this.$val.Attr(property); };
-	JQuery.Ptr.prototype.SetAttr = function(i) {
+	JQuery.ptr.prototype.SetAttr = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.attr.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.attr.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.SetAttr = function(i) { return this.$val.SetAttr(i); };
-	JQuery.Ptr.prototype.RemoveAttr = function(property) {
+	JQuery.ptr.prototype.RemoveAttr = function(property) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.removeAttr($externalize(property, $String));
 		return j;
 	};
 	JQuery.prototype.RemoveAttr = function(property) { return this.$val.RemoveAttr(property); };
-	JQuery.Ptr.prototype.HasClass = function(class$1) {
+	JQuery.ptr.prototype.HasClass = function(class$1) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return !!(j.o.hasClass($externalize(class$1, $String)));
 	};
 	JQuery.prototype.HasClass = function(class$1) { return this.$val.HasClass(class$1); };
-	JQuery.Ptr.prototype.AddClass = function(i) {
-		var j, _ref;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+	JQuery.ptr.prototype.AddClass = function(i) {
+		var _ref, j;
+		j = $clone(this, JQuery);
 		_ref = i;
-		if ($assertType(_ref, ($funcType([$Int, $String], [$String], false)), true)[1] || $assertType(_ref, $String, true)[1]) {
+		if ($assertType(_ref, funcType$2, true)[1] || $assertType(_ref, $String, true)[1]) {
 		} else {
 			console.log("addClass Argument should be 'string' or 'func(int, string) string'");
 		}
@@ -2255,127 +2459,136 @@ $packages["github.com/gopherjs/jquery"] = (function() {
 		return j;
 	};
 	JQuery.prototype.AddClass = function(i) { return this.$val.AddClass(i); };
-	JQuery.Ptr.prototype.RemoveClass = function(property) {
+	JQuery.ptr.prototype.RemoveClass = function(property) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.removeClass($externalize(property, $String));
 		return j;
 	};
 	JQuery.prototype.RemoveClass = function(property) { return this.$val.RemoveClass(property); };
-	JQuery.Ptr.prototype.ToggleClass = function(i) {
+	JQuery.ptr.prototype.ToggleClass = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.toggleClass.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.toggleClass.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.ToggleClass = function(i) { return this.$val.ToggleClass(i); };
-	JQuery.Ptr.prototype.Focus = function() {
+	JQuery.ptr.prototype.Focus = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.focus();
 		return j;
 	};
 	JQuery.prototype.Focus = function() { return this.$val.Focus(); };
-	JQuery.Ptr.prototype.Blur = function() {
+	JQuery.ptr.prototype.Blur = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.blur();
 		return j;
 	};
 	JQuery.prototype.Blur = function() { return this.$val.Blur(); };
-	JQuery.Ptr.prototype.ReplaceAll = function(i) {
+	JQuery.ptr.prototype.ReplaceAll = function(i) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom1arg("replaceAll", i);
+		j = $clone(this, JQuery);
+		j.o = j.o.replaceAll($externalize(i, $emptyInterface));
+		return j;
 	};
 	JQuery.prototype.ReplaceAll = function(i) { return this.$val.ReplaceAll(i); };
-	JQuery.Ptr.prototype.ReplaceWith = function(i) {
+	JQuery.ptr.prototype.ReplaceWith = function(i) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom1arg("replaceWith", i);
+		j = $clone(this, JQuery);
+		j.o = j.o.replaceWith($externalize(i, $emptyInterface));
+		return j;
 	};
 	JQuery.prototype.ReplaceWith = function(i) { return this.$val.ReplaceWith(i); };
-	JQuery.Ptr.prototype.After = function(i) {
+	JQuery.ptr.prototype.After = function(i) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom2args("after", i);
+		j = $clone(this, JQuery);
+		j.o = j.o.after($externalize(i, sliceType));
+		return j;
 	};
 	JQuery.prototype.After = function(i) { return this.$val.After(i); };
-	JQuery.Ptr.prototype.Before = function(i) {
-		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom2args("before", i);
+	JQuery.ptr.prototype.Before = function(i) {
+		var j, obj;
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.before.apply(obj, $externalize(i, sliceType)));
+		return j;
 	};
 	JQuery.prototype.Before = function(i) { return this.$val.Before(i); };
-	JQuery.Ptr.prototype.Prepend = function(i) {
-		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom2args("prepend", i);
+	JQuery.ptr.prototype.Prepend = function(i) {
+		var j, obj;
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.prepend.apply(obj, $externalize(i, sliceType)));
+		return j;
 	};
 	JQuery.prototype.Prepend = function(i) { return this.$val.Prepend(i); };
-	JQuery.Ptr.prototype.PrependTo = function(i) {
+	JQuery.ptr.prototype.PrependTo = function(i) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom1arg("prependTo", i);
+		j = $clone(this, JQuery);
+		j.o = j.o.prependTo($externalize(i, $emptyInterface));
+		return j;
 	};
 	JQuery.prototype.PrependTo = function(i) { return this.$val.PrependTo(i); };
-	JQuery.Ptr.prototype.AppendTo = function(i) {
+	JQuery.ptr.prototype.AppendTo = function(i) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom1arg("appendTo", i);
+		j = $clone(this, JQuery);
+		j.o = j.o.appendTo($externalize(i, $emptyInterface));
+		return j;
 	};
 	JQuery.prototype.AppendTo = function(i) { return this.$val.AppendTo(i); };
-	JQuery.Ptr.prototype.InsertAfter = function(i) {
+	JQuery.ptr.prototype.InsertAfter = function(i) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom1arg("insertAfter", i);
+		j = $clone(this, JQuery);
+		j.o = j.o.insertAfter($externalize(i, $emptyInterface));
+		return j;
 	};
 	JQuery.prototype.InsertAfter = function(i) { return this.$val.InsertAfter(i); };
-	JQuery.Ptr.prototype.InsertBefore = function(i) {
+	JQuery.ptr.prototype.InsertBefore = function(i) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom1arg("insertBefore", i);
+		j = $clone(this, JQuery);
+		j.o = j.o.insertBefore($externalize(i, $emptyInterface));
+		return j;
 	};
 	JQuery.prototype.InsertBefore = function(i) { return this.$val.InsertBefore(i); };
-	JQuery.Ptr.prototype.Show = function() {
+	JQuery.ptr.prototype.Show = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.show();
 		return j;
 	};
 	JQuery.prototype.Show = function() { return this.$val.Show(); };
-	JQuery.Ptr.prototype.Hide = function() {
+	JQuery.ptr.prototype.Hide = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o.hide();
 		return j;
 	};
 	JQuery.prototype.Hide = function() { return this.$val.Hide(); };
-	JQuery.Ptr.prototype.Toggle = function(showOrHide) {
+	JQuery.ptr.prototype.Toggle = function(showOrHide) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.toggle($externalize(showOrHide, $Bool));
 		return j;
 	};
 	JQuery.prototype.Toggle = function(showOrHide) { return this.$val.Toggle(showOrHide); };
-	JQuery.Ptr.prototype.Contents = function() {
+	JQuery.ptr.prototype.Contents = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.contents();
 		return j;
 	};
 	JQuery.prototype.Contents = function() { return this.$val.Contents(); };
-	JQuery.Ptr.prototype.Html = function() {
+	JQuery.ptr.prototype.Html = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $internalize(j.o.html(), $String);
 	};
 	JQuery.prototype.Html = function() { return this.$val.Html(); };
-	JQuery.Ptr.prototype.SetHtml = function(i) {
-		var j, _ref;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+	JQuery.ptr.prototype.SetHtml = function(i) {
+		var _ref, j;
+		j = $clone(this, JQuery);
 		_ref = i;
-		if ($assertType(_ref, ($funcType([$Int, $String], [$String], false)), true)[1] || $assertType(_ref, $String, true)[1]) {
+		if ($assertType(_ref, funcType$2, true)[1] || $assertType(_ref, $String, true)[1]) {
 		} else {
 			console.log("SetHtml Argument should be 'string' or 'func(int, string) string'");
 		}
@@ -2383,56 +2596,58 @@ $packages["github.com/gopherjs/jquery"] = (function() {
 		return j;
 	};
 	JQuery.prototype.SetHtml = function(i) { return this.$val.SetHtml(i); };
-	JQuery.Ptr.prototype.Closest = function(i) {
-		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom2args("closest", i);
+	JQuery.ptr.prototype.Closest = function(i) {
+		var j, obj;
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.closest.apply(obj, $externalize(i, sliceType)));
+		return j;
 	};
 	JQuery.prototype.Closest = function(i) { return this.$val.Closest(i); };
-	JQuery.Ptr.prototype.End = function() {
+	JQuery.ptr.prototype.End = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.end();
 		return j;
 	};
 	JQuery.prototype.End = function() { return this.$val.End(); };
-	JQuery.Ptr.prototype.Add = function(i) {
-		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom2args("add", i);
+	JQuery.ptr.prototype.Add = function(i) {
+		var j, obj;
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.add.apply(obj, $externalize(i, sliceType)));
+		return j;
 	};
 	JQuery.prototype.Add = function(i) { return this.$val.Add(i); };
-	JQuery.Ptr.prototype.Clone = function(b) {
+	JQuery.ptr.prototype.Clone = function(b) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.clone.apply(obj, $externalize(b, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.clone.apply(obj, $externalize(b, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Clone = function(b) { return this.$val.Clone(b); };
-	JQuery.Ptr.prototype.Height = function() {
+	JQuery.ptr.prototype.Height = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $parseInt(j.o.height()) >> 0;
 	};
 	JQuery.prototype.Height = function() { return this.$val.Height(); };
-	JQuery.Ptr.prototype.SetHeight = function(value) {
+	JQuery.ptr.prototype.SetHeight = function(value) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.height($externalize(value, $String));
 		return j;
 	};
 	JQuery.prototype.SetHeight = function(value) { return this.$val.SetHeight(value); };
-	JQuery.Ptr.prototype.Width = function() {
+	JQuery.ptr.prototype.Width = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $parseInt(j.o.width()) >> 0;
 	};
 	JQuery.prototype.Width = function() { return this.$val.Width(); };
-	JQuery.Ptr.prototype.SetWidth = function(i) {
-		var j, _ref;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+	JQuery.ptr.prototype.SetWidth = function(i) {
+		var _ref, j;
+		j = $clone(this, JQuery);
 		_ref = i;
-		if ($assertType(_ref, ($funcType([$Int, $String], [$String], false)), true)[1] || $assertType(_ref, $String, true)[1]) {
+		if ($assertType(_ref, funcType$2, true)[1] || $assertType(_ref, $String, true)[1]) {
 		} else {
 			console.log("SetWidth Argument should be 'string' or 'func(int, string) string'");
 		}
@@ -2440,100 +2655,101 @@ $packages["github.com/gopherjs/jquery"] = (function() {
 		return j;
 	};
 	JQuery.prototype.SetWidth = function(i) { return this.$val.SetWidth(i); };
-	JQuery.Ptr.prototype.InnerHeight = function() {
+	JQuery.ptr.prototype.InnerHeight = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $parseInt(j.o.innerHeight()) >> 0;
 	};
 	JQuery.prototype.InnerHeight = function() { return this.$val.InnerHeight(); };
-	JQuery.Ptr.prototype.InnerWidth = function() {
+	JQuery.ptr.prototype.InnerWidth = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $parseInt(j.o.innerWidth()) >> 0;
 	};
 	JQuery.prototype.InnerWidth = function() { return this.$val.InnerWidth(); };
-	JQuery.Ptr.prototype.Offset = function() {
+	JQuery.ptr.prototype.Offset = function() {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		obj = j.o.offset();
-		return new JQueryCoordinates.Ptr($parseInt(obj.left) >> 0, $parseInt(obj.top) >> 0);
+		return new JQueryCoordinates.ptr($parseInt(obj.left) >> 0, $parseInt(obj.top) >> 0);
 	};
 	JQuery.prototype.Offset = function() { return this.$val.Offset(); };
-	JQuery.Ptr.prototype.SetOffset = function(jc) {
+	JQuery.ptr.prototype.SetOffset = function(jc) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
+		jc = $clone(jc, JQueryCoordinates);
 		j.o = j.o.offset($externalize(jc, JQueryCoordinates));
 		return j;
 	};
 	JQuery.prototype.SetOffset = function(jc) { return this.$val.SetOffset(jc); };
-	JQuery.Ptr.prototype.OuterHeight = function(includeMargin) {
+	JQuery.ptr.prototype.OuterHeight = function(includeMargin) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		if (includeMargin.$length === 0) {
 			return $parseInt(j.o.outerHeight()) >> 0;
 		}
 		return $parseInt(j.o.outerHeight($externalize(((0 < 0 || 0 >= includeMargin.$length) ? $throwRuntimeError("index out of range") : includeMargin.$array[includeMargin.$offset + 0]), $Bool))) >> 0;
 	};
 	JQuery.prototype.OuterHeight = function(includeMargin) { return this.$val.OuterHeight(includeMargin); };
-	JQuery.Ptr.prototype.OuterWidth = function(includeMargin) {
+	JQuery.ptr.prototype.OuterWidth = function(includeMargin) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		if (includeMargin.$length === 0) {
 			return $parseInt(j.o.outerWidth()) >> 0;
 		}
 		return $parseInt(j.o.outerWidth($externalize(((0 < 0 || 0 >= includeMargin.$length) ? $throwRuntimeError("index out of range") : includeMargin.$array[includeMargin.$offset + 0]), $Bool))) >> 0;
 	};
 	JQuery.prototype.OuterWidth = function(includeMargin) { return this.$val.OuterWidth(includeMargin); };
-	JQuery.Ptr.prototype.Position = function() {
+	JQuery.ptr.prototype.Position = function() {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		obj = j.o.position();
-		return new JQueryCoordinates.Ptr($parseInt(obj.left) >> 0, $parseInt(obj.top) >> 0);
+		return new JQueryCoordinates.ptr($parseInt(obj.left) >> 0, $parseInt(obj.top) >> 0);
 	};
 	JQuery.prototype.Position = function() { return this.$val.Position(); };
-	JQuery.Ptr.prototype.ScrollLeft = function() {
+	JQuery.ptr.prototype.ScrollLeft = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $parseInt(j.o.scrollLeft()) >> 0;
 	};
 	JQuery.prototype.ScrollLeft = function() { return this.$val.ScrollLeft(); };
-	JQuery.Ptr.prototype.SetScrollLeft = function(value) {
+	JQuery.ptr.prototype.SetScrollLeft = function(value) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.scrollLeft(value);
 		return j;
 	};
 	JQuery.prototype.SetScrollLeft = function(value) { return this.$val.SetScrollLeft(value); };
-	JQuery.Ptr.prototype.ScrollTop = function() {
+	JQuery.ptr.prototype.ScrollTop = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $parseInt(j.o.scrollTop()) >> 0;
 	};
 	JQuery.prototype.ScrollTop = function() { return this.$val.ScrollTop(); };
-	JQuery.Ptr.prototype.SetScrollTop = function(value) {
+	JQuery.ptr.prototype.SetScrollTop = function(value) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.scrollTop(value);
 		return j;
 	};
 	JQuery.prototype.SetScrollTop = function(value) { return this.$val.SetScrollTop(value); };
-	JQuery.Ptr.prototype.ClearQueue = function(queueName) {
+	JQuery.ptr.prototype.ClearQueue = function(queueName) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.clearQueue($externalize(queueName, $String));
 		return j;
 	};
 	JQuery.prototype.ClearQueue = function(queueName) { return this.$val.ClearQueue(queueName); };
-	JQuery.Ptr.prototype.SetData = function(key, value) {
+	JQuery.ptr.prototype.SetData = function(key, value) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.data($externalize(key, $String), $externalize(value, $emptyInterface));
 		return j;
 	};
 	JQuery.prototype.SetData = function(key, value) { return this.$val.SetData(key, value); };
-	JQuery.Ptr.prototype.Data = function(key) {
+	JQuery.ptr.prototype.Data = function(key) {
 		var j, result;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		result = j.o.data($externalize(key, $String));
 		if (result === undefined) {
 			return $ifaceNil;
@@ -2541,401 +2757,295 @@ $packages["github.com/gopherjs/jquery"] = (function() {
 		return $internalize(result, $emptyInterface);
 	};
 	JQuery.prototype.Data = function(key) { return this.$val.Data(key); };
-	JQuery.Ptr.prototype.Dequeue = function(queueName) {
+	JQuery.ptr.prototype.Dequeue = function(queueName) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.dequeue($externalize(queueName, $String));
 		return j;
 	};
 	JQuery.prototype.Dequeue = function(queueName) { return this.$val.Dequeue(queueName); };
-	JQuery.Ptr.prototype.RemoveData = function(name) {
+	JQuery.ptr.prototype.RemoveData = function(name) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.removeData($externalize(name, $String));
 		return j;
 	};
 	JQuery.prototype.RemoveData = function(name) { return this.$val.RemoveData(name); };
-	JQuery.Ptr.prototype.OffsetParent = function() {
+	JQuery.ptr.prototype.OffsetParent = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.offsetParent();
 		return j;
 	};
 	JQuery.prototype.OffsetParent = function() { return this.$val.OffsetParent(); };
-	JQuery.Ptr.prototype.Parent = function(i) {
+	JQuery.ptr.prototype.Parent = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.parent.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.parent.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Parent = function(i) { return this.$val.Parent(i); };
-	JQuery.Ptr.prototype.Parents = function(i) {
+	JQuery.ptr.prototype.Parents = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.parents.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.parents.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Parents = function(i) { return this.$val.Parents(i); };
-	JQuery.Ptr.prototype.ParentsUntil = function(i) {
+	JQuery.ptr.prototype.ParentsUntil = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.parentsUntil.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.parentsUntil.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.ParentsUntil = function(i) { return this.$val.ParentsUntil(i); };
-	JQuery.Ptr.prototype.Prev = function(i) {
+	JQuery.ptr.prototype.Prev = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.prev.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.prev.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Prev = function(i) { return this.$val.Prev(i); };
-	JQuery.Ptr.prototype.PrevAll = function(i) {
+	JQuery.ptr.prototype.PrevAll = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.prevAll.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.prevAll.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.PrevAll = function(i) { return this.$val.PrevAll(i); };
-	JQuery.Ptr.prototype.PrevUntil = function(i) {
+	JQuery.ptr.prototype.PrevUntil = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.prevUntil.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.prevUntil.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.PrevUntil = function(i) { return this.$val.PrevUntil(i); };
-	JQuery.Ptr.prototype.Siblings = function(i) {
+	JQuery.ptr.prototype.Siblings = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.siblings.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.siblings.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Siblings = function(i) { return this.$val.Siblings(i); };
-	JQuery.Ptr.prototype.Slice = function(i) {
+	JQuery.ptr.prototype.Slice = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.slice.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.slice.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Slice = function(i) { return this.$val.Slice(i); };
-	JQuery.Ptr.prototype.Children = function(selector) {
+	JQuery.ptr.prototype.Children = function(selector) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.children($externalize(selector, $emptyInterface));
 		return j;
 	};
 	JQuery.prototype.Children = function(selector) { return this.$val.Children(selector); };
-	JQuery.Ptr.prototype.Unwrap = function() {
+	JQuery.ptr.prototype.Unwrap = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.unwrap();
 		return j;
 	};
 	JQuery.prototype.Unwrap = function() { return this.$val.Unwrap(); };
-	JQuery.Ptr.prototype.Wrap = function(obj) {
+	JQuery.ptr.prototype.Wrap = function(obj) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.wrap($externalize(obj, $emptyInterface));
 		return j;
 	};
 	JQuery.prototype.Wrap = function(obj) { return this.$val.Wrap(obj); };
-	JQuery.Ptr.prototype.WrapAll = function(i) {
+	JQuery.ptr.prototype.WrapAll = function(i) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom1arg("wrapAll", i);
+		j = $clone(this, JQuery);
+		j.o = j.o.wrapAll($externalize(i, $emptyInterface));
+		return j;
 	};
 	JQuery.prototype.WrapAll = function(i) { return this.$val.WrapAll(i); };
-	JQuery.Ptr.prototype.WrapInner = function(i) {
+	JQuery.ptr.prototype.WrapInner = function(i) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.dom1arg("wrapInner", i);
+		j = $clone(this, JQuery);
+		j.o = j.o.wrapInner($externalize(i, $emptyInterface));
+		return j;
 	};
 	JQuery.prototype.WrapInner = function(i) { return this.$val.WrapInner(i); };
-	JQuery.Ptr.prototype.Next = function(i) {
+	JQuery.ptr.prototype.Next = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.next.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.next.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Next = function(i) { return this.$val.Next(i); };
-	JQuery.Ptr.prototype.NextAll = function(i) {
+	JQuery.ptr.prototype.NextAll = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.nextAll.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.nextAll.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.NextAll = function(i) { return this.$val.NextAll(i); };
-	JQuery.Ptr.prototype.NextUntil = function(i) {
+	JQuery.ptr.prototype.NextUntil = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.nextUntil.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.nextUntil.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.NextUntil = function(i) { return this.$val.NextUntil(i); };
-	JQuery.Ptr.prototype.Not = function(i) {
+	JQuery.ptr.prototype.Not = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.not.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.not.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Not = function(i) { return this.$val.Not(i); };
-	JQuery.Ptr.prototype.Filter = function(i) {
+	JQuery.ptr.prototype.Filter = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.filter.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.filter.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Filter = function(i) { return this.$val.Filter(i); };
-	JQuery.Ptr.prototype.Find = function(i) {
+	JQuery.ptr.prototype.Find = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.find.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.find.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Find = function(i) { return this.$val.Find(i); };
-	JQuery.Ptr.prototype.First = function() {
+	JQuery.ptr.prototype.First = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.first();
 		return j;
 	};
 	JQuery.prototype.First = function() { return this.$val.First(); };
-	JQuery.Ptr.prototype.Has = function(selector) {
+	JQuery.ptr.prototype.Has = function(selector) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.has($externalize(selector, $String));
 		return j;
 	};
 	JQuery.prototype.Has = function(selector) { return this.$val.Has(selector); };
-	JQuery.Ptr.prototype.Is = function(i) {
+	JQuery.ptr.prototype.Is = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return !!((obj = j.o, obj.is.apply(obj, $externalize(i, ($sliceType($emptyInterface))))));
+		j = $clone(this, JQuery);
+		return !!((obj = j.o, obj.is.apply(obj, $externalize(i, sliceType))));
 	};
 	JQuery.prototype.Is = function(i) { return this.$val.Is(i); };
-	JQuery.Ptr.prototype.Last = function() {
+	JQuery.ptr.prototype.Last = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		j.o = j.o.last();
 		return j;
 	};
 	JQuery.prototype.Last = function() { return this.$val.Last(); };
-	JQuery.Ptr.prototype.Ready = function(handler) {
+	JQuery.ptr.prototype.Ready = function(handler) {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = j.o.ready($externalize(handler, ($funcType([], [], false))));
+		j = $clone(this, JQuery);
+		j.o = j.o.ready($externalize(handler, funcType$3));
 		return j;
 	};
 	JQuery.prototype.Ready = function(handler) { return this.$val.Ready(handler); };
-	JQuery.Ptr.prototype.Resize = function(i) {
+	JQuery.ptr.prototype.Resize = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.resize.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.resize.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Resize = function(i) { return this.$val.Resize(i); };
-	JQuery.Ptr.prototype.Scroll = function(i) {
-		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.handleEvent("scroll", i);
+	JQuery.ptr.prototype.Scroll = function(i) {
+		var j, obj;
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.scroll.apply(obj, $externalize(i, sliceType)));
+		return j;
 	};
 	JQuery.prototype.Scroll = function(i) { return this.$val.Scroll(i); };
-	JQuery.Ptr.prototype.FadeOut = function(i) {
+	JQuery.ptr.prototype.FadeOut = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.fadeOut.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.fadeOut.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.FadeOut = function(i) { return this.$val.FadeOut(i); };
-	JQuery.Ptr.prototype.Select = function(i) {
-		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.handleEvent("select", i);
-	};
-	JQuery.prototype.Select = function(i) { return this.$val.Select(i); };
-	JQuery.Ptr.prototype.Submit = function(i) {
-		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.handleEvent("submit", i);
-	};
-	JQuery.prototype.Submit = function(i) { return this.$val.Submit(i); };
-	JQuery.Ptr.prototype.handleEvent = function(evt, i) {
-		var j, _ref;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		_ref = i.$length;
-		if (_ref === 0) {
-			j.o = j.o[$externalize(evt, $String)]();
-		} else if (_ref === 1) {
-			j.o = j.o[$externalize(evt, $String)]($externalize((function(e) {
-				$assertType(((0 < 0 || 0 >= i.$length) ? $throwRuntimeError("index out of range") : i.$array[i.$offset + 0]), ($funcType([Event], [], false)))(new Event.Ptr(e, 0, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, 0, "", false, 0, 0, ""));
-			}), ($funcType([js.Object], [], false))));
-		} else if (_ref === 2) {
-			j.o = j.o[$externalize(evt, $String)]($externalize($assertType(((0 < 0 || 0 >= i.$length) ? $throwRuntimeError("index out of range") : i.$array[i.$offset + 0]), ($mapType($String, $emptyInterface))), ($mapType($String, $emptyInterface))), $externalize((function(e) {
-				$assertType(((1 < 0 || 1 >= i.$length) ? $throwRuntimeError("index out of range") : i.$array[i.$offset + 1]), ($funcType([Event], [], false)))(new Event.Ptr(e, 0, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, 0, "", false, 0, 0, ""));
-			}), ($funcType([js.Object], [], false))));
-		} else {
-			console.log(evt + " event expects 0 to 2 arguments");
-		}
+	JQuery.ptr.prototype.Select = function(i) {
+		var j, obj;
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.select.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
-	JQuery.prototype.handleEvent = function(evt, i) { return this.$val.handleEvent(evt, i); };
-	JQuery.Ptr.prototype.Trigger = function(i) {
+	JQuery.prototype.Select = function(i) { return this.$val.Select(i); };
+	JQuery.ptr.prototype.Submit = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.trigger.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.submit.apply(obj, $externalize(i, sliceType)));
+		return j;
+	};
+	JQuery.prototype.Submit = function(i) { return this.$val.Submit(i); };
+	JQuery.ptr.prototype.Trigger = function(i) {
+		var j, obj;
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.trigger.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Trigger = function(i) { return this.$val.Trigger(i); };
-	JQuery.Ptr.prototype.On = function(p) {
-		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.events("on", p);
-	};
-	JQuery.prototype.On = function(p) { return this.$val.On(p); };
-	JQuery.Ptr.prototype.One = function(p) {
-		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.events("one", p);
-	};
-	JQuery.prototype.One = function(p) { return this.$val.One(p); };
-	JQuery.Ptr.prototype.Off = function(p) {
-		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		return j.events("off", p);
-	};
-	JQuery.prototype.Off = function(p) { return this.$val.Off(p); };
-	JQuery.Ptr.prototype.events = function(evt, p) {
-		var j, count, isEventFunc, _ref, x, _ref$1, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		count = p.$length;
-		isEventFunc = false;
-		_ref = (x = p.$length - 1 >> 0, ((x < 0 || x >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + x]));
-		if ($assertType(_ref, ($funcType([Event], [], false)), true)[1]) {
-			isEventFunc = true;
-		} else {
-			isEventFunc = false;
-		}
-		_ref$1 = count;
-		if (_ref$1 === 0) {
-			j.o = j.o[$externalize(evt, $String)]();
-			return j;
-		} else if (_ref$1 === 1) {
-			j.o = j.o[$externalize(evt, $String)]($externalize(((0 < 0 || 0 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 0]), $emptyInterface));
-			return j;
-		} else if (_ref$1 === 2) {
-			if (isEventFunc) {
-				j.o = j.o[$externalize(evt, $String)]($externalize(((0 < 0 || 0 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 0]), $emptyInterface), $externalize((function(e) {
-					$assertType(((1 < 0 || 1 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 1]), ($funcType([Event], [], false)))(new Event.Ptr(e, 0, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, 0, "", false, 0, 0, ""));
-				}), ($funcType([js.Object], [], false))));
-				return j;
-			} else {
-				j.o = j.o[$externalize(evt, $String)]($externalize(((0 < 0 || 0 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 0]), $emptyInterface), $externalize(((1 < 0 || 1 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 1]), $emptyInterface));
-				return j;
-			}
-		} else if (_ref$1 === 3) {
-			if (isEventFunc) {
-				j.o = j.o[$externalize(evt, $String)]($externalize(((0 < 0 || 0 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 0]), $emptyInterface), $externalize(((1 < 0 || 1 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 1]), $emptyInterface), $externalize((function(e) {
-					$assertType(((2 < 0 || 2 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 2]), ($funcType([Event], [], false)))(new Event.Ptr(e, 0, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, 0, "", false, 0, 0, ""));
-				}), ($funcType([js.Object], [], false))));
-				return j;
-			} else {
-				j.o = j.o[$externalize(evt, $String)]($externalize(((0 < 0 || 0 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 0]), $emptyInterface), $externalize(((1 < 0 || 1 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 1]), $emptyInterface), $externalize(((2 < 0 || 2 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 2]), $emptyInterface));
-				return j;
-			}
-		} else if (_ref$1 === 4) {
-			if (isEventFunc) {
-				j.o = j.o[$externalize(evt, $String)]($externalize(((0 < 0 || 0 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 0]), $emptyInterface), $externalize(((1 < 0 || 1 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 1]), $emptyInterface), $externalize(((2 < 0 || 2 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 2]), $emptyInterface), $externalize((function(e) {
-					$assertType(((3 < 0 || 3 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 3]), ($funcType([Event], [], false)))(new Event.Ptr(e, 0, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, $ifaceNil, 0, "", false, 0, 0, ""));
-				}), ($funcType([js.Object], [], false))));
-				return j;
-			} else {
-				j.o = j.o[$externalize(evt, $String)]($externalize(((0 < 0 || 0 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 0]), $emptyInterface), $externalize(((1 < 0 || 1 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 1]), $emptyInterface), $externalize(((2 < 0 || 2 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 2]), $emptyInterface), $externalize(((3 < 0 || 3 >= p.$length) ? $throwRuntimeError("index out of range") : p.$array[p.$offset + 3]), $emptyInterface));
-				return j;
-			}
-		} else {
-			console.log(evt + " event should no have more than 4 arguments");
-			j.o = (obj = j.o, obj[$externalize(evt, $String)].apply(obj, $externalize(p, ($sliceType($emptyInterface)))));
-			return j;
-		}
-	};
-	JQuery.prototype.events = function(evt, p) { return this.$val.events(evt, p); };
-	JQuery.Ptr.prototype.dom2args = function(method, i) {
-		var j, _ref, _tuple, selector, selOk, _tuple$1, context, ctxOk, _tuple$2, selector$1, selOk$1;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		_ref = i.$length;
-		if (_ref === 2) {
-			_tuple = $assertType(((0 < 0 || 0 >= i.$length) ? $throwRuntimeError("index out of range") : i.$array[i.$offset + 0]), JQuery, true); selector = new JQuery.Ptr(); $copy(selector, _tuple[0], JQuery); selOk = _tuple[1];
-			_tuple$1 = $assertType(((1 < 0 || 1 >= i.$length) ? $throwRuntimeError("index out of range") : i.$array[i.$offset + 1]), JQuery, true); context = new JQuery.Ptr(); $copy(context, _tuple$1[0], JQuery); ctxOk = _tuple$1[1];
-			if (!selOk && !ctxOk) {
-				j.o = j.o[$externalize(method, $String)]($externalize(((0 < 0 || 0 >= i.$length) ? $throwRuntimeError("index out of range") : i.$array[i.$offset + 0]), $emptyInterface), $externalize(((1 < 0 || 1 >= i.$length) ? $throwRuntimeError("index out of range") : i.$array[i.$offset + 1]), $emptyInterface));
-				return j;
-			} else if (selOk && !ctxOk) {
-				j.o = j.o[$externalize(method, $String)](selector.o, $externalize(((1 < 0 || 1 >= i.$length) ? $throwRuntimeError("index out of range") : i.$array[i.$offset + 1]), $emptyInterface));
-				return j;
-			} else if (!selOk && ctxOk) {
-				j.o = j.o[$externalize(method, $String)]($externalize(((0 < 0 || 0 >= i.$length) ? $throwRuntimeError("index out of range") : i.$array[i.$offset + 0]), $emptyInterface), context.o);
-				return j;
-			}
-			j.o = j.o[$externalize(method, $String)](selector.o, context.o);
-			return j;
-		} else if (_ref === 1) {
-			_tuple$2 = $assertType(((0 < 0 || 0 >= i.$length) ? $throwRuntimeError("index out of range") : i.$array[i.$offset + 0]), JQuery, true); selector$1 = new JQuery.Ptr(); $copy(selector$1, _tuple$2[0], JQuery); selOk$1 = _tuple$2[1];
-			if (!selOk$1) {
-				j.o = j.o[$externalize(method, $String)]($externalize(((0 < 0 || 0 >= i.$length) ? $throwRuntimeError("index out of range") : i.$array[i.$offset + 0]), $emptyInterface));
-				return j;
-			}
-			j.o = j.o[$externalize(method, $String)](selector$1.o);
-			return j;
-		} else {
-			console.log(" only 1 or 2 parameters allowed for method ", method);
-			return j;
-		}
-	};
-	JQuery.prototype.dom2args = function(method, i) { return this.$val.dom2args(method, i); };
-	JQuery.Ptr.prototype.dom1arg = function(method, i) {
-		var j, _tuple, selector, selOk;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		_tuple = $assertType(i, JQuery, true); selector = new JQuery.Ptr(); $copy(selector, _tuple[0], JQuery); selOk = _tuple[1];
-		if (!selOk) {
-			j.o = j.o[$externalize(method, $String)]($externalize(i, $emptyInterface));
-			return j;
-		}
-		j.o = j.o[$externalize(method, $String)](selector.o);
+	JQuery.ptr.prototype.On = function(i) {
+		var j, obj;
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.on.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
-	JQuery.prototype.dom1arg = function(method, i) { return this.$val.dom1arg(method, i); };
-	JQuery.Ptr.prototype.Load = function(i) {
+	JQuery.prototype.On = function(i) { return this.$val.On(i); };
+	JQuery.ptr.prototype.One = function(i) {
 		var j, obj;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
-		j.o = (obj = j.o, obj.load.apply(obj, $externalize(i, ($sliceType($emptyInterface)))));
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.one.apply(obj, $externalize(i, sliceType)));
+		return j;
+	};
+	JQuery.prototype.One = function(i) { return this.$val.One(i); };
+	JQuery.ptr.prototype.Off = function(i) {
+		var j, obj;
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.off.apply(obj, $externalize(i, sliceType)));
+		return j;
+	};
+	JQuery.prototype.Off = function(i) { return this.$val.Off(i); };
+	JQuery.ptr.prototype.Load = function(i) {
+		var j, obj;
+		j = $clone(this, JQuery);
+		j.o = (obj = j.o, obj.load.apply(obj, $externalize(i, sliceType)));
 		return j;
 	};
 	JQuery.prototype.Load = function(i) { return this.$val.Load(i); };
-	JQuery.Ptr.prototype.Serialize = function() {
+	JQuery.ptr.prototype.Serialize = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return $internalize(j.o.serialize(), $String);
 	};
 	JQuery.prototype.Serialize = function() { return this.$val.Serialize(); };
-	JQuery.Ptr.prototype.SerializeArray = function() {
+	JQuery.ptr.prototype.SerializeArray = function() {
 		var j;
-		j = new JQuery.Ptr(); $copy(j, this, JQuery);
+		j = $clone(this, JQuery);
 		return j.o.serializeArray();
 	};
 	JQuery.prototype.SerializeArray = function() { return this.$val.SerializeArray(); };
+	JQuery.methods = [{prop: "Add", name: "Add", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "AddBack", name: "AddBack", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "AddClass", name: "AddClass", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "After", name: "After", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Append", name: "Append", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "AppendTo", name: "AppendTo", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "Attr", name: "Attr", pkg: "", type: $funcType([$String], [$String], false)}, {prop: "Before", name: "Before", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Blur", name: "Blur", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Children", name: "Children", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "ClearQueue", name: "ClearQueue", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "Clone", name: "Clone", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Closest", name: "Closest", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Contents", name: "Contents", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Css", name: "Css", pkg: "", type: $funcType([$String], [$String], false)}, {prop: "CssArray", name: "CssArray", pkg: "", type: $funcType([sliceType$1], [mapType], true)}, {prop: "Data", name: "Data", pkg: "", type: $funcType([$String], [$emptyInterface], false)}, {prop: "Delay", name: "Delay", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Dequeue", name: "Dequeue", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "Detach", name: "Detach", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Each", name: "Each", pkg: "", type: $funcType([funcType$1], [JQuery], false)}, {prop: "Empty", name: "Empty", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "End", name: "End", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Eq", name: "Eq", pkg: "", type: $funcType([$Int], [JQuery], false)}, {prop: "FadeIn", name: "FadeIn", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "FadeOut", name: "FadeOut", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Filter", name: "Filter", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Find", name: "Find", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "First", name: "First", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Focus", name: "Focus", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Get", name: "Get", pkg: "", type: $funcType([sliceType], [js.Object], true)}, {prop: "Has", name: "Has", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "HasClass", name: "HasClass", pkg: "", type: $funcType([$String], [$Bool], false)}, {prop: "Height", name: "Height", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Hide", name: "Hide", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Html", name: "Html", pkg: "", type: $funcType([], [$String], false)}, {prop: "InnerHeight", name: "InnerHeight", pkg: "", type: $funcType([], [$Int], false)}, {prop: "InnerWidth", name: "InnerWidth", pkg: "", type: $funcType([], [$Int], false)}, {prop: "InsertAfter", name: "InsertAfter", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "InsertBefore", name: "InsertBefore", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "Is", name: "Is", pkg: "", type: $funcType([sliceType], [$Bool], true)}, {prop: "Last", name: "Last", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Load", name: "Load", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Next", name: "Next", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "NextAll", name: "NextAll", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "NextUntil", name: "NextUntil", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Not", name: "Not", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Off", name: "Off", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Offset", name: "Offset", pkg: "", type: $funcType([], [JQueryCoordinates], false)}, {prop: "OffsetParent", name: "OffsetParent", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "On", name: "On", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "One", name: "One", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "OuterHeight", name: "OuterHeight", pkg: "", type: $funcType([sliceType$2], [$Int], true)}, {prop: "OuterWidth", name: "OuterWidth", pkg: "", type: $funcType([sliceType$2], [$Int], true)}, {prop: "Parent", name: "Parent", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Parents", name: "Parents", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "ParentsUntil", name: "ParentsUntil", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Position", name: "Position", pkg: "", type: $funcType([], [JQueryCoordinates], false)}, {prop: "Prepend", name: "Prepend", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "PrependTo", name: "PrependTo", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "Prev", name: "Prev", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "PrevAll", name: "PrevAll", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "PrevUntil", name: "PrevUntil", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Prop", name: "Prop", pkg: "", type: $funcType([$String], [$emptyInterface], false)}, {prop: "Ready", name: "Ready", pkg: "", type: $funcType([funcType$3], [JQuery], false)}, {prop: "Remove", name: "Remove", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "RemoveAttr", name: "RemoveAttr", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "RemoveClass", name: "RemoveClass", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "RemoveData", name: "RemoveData", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "RemoveProp", name: "RemoveProp", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "ReplaceAll", name: "ReplaceAll", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "ReplaceWith", name: "ReplaceWith", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "Resize", name: "Resize", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Scroll", name: "Scroll", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "ScrollLeft", name: "ScrollLeft", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ScrollTop", name: "ScrollTop", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Select", name: "Select", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Serialize", name: "Serialize", pkg: "", type: $funcType([], [$String], false)}, {prop: "SerializeArray", name: "SerializeArray", pkg: "", type: $funcType([], [js.Object], false)}, {prop: "SetAttr", name: "SetAttr", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "SetCss", name: "SetCss", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "SetData", name: "SetData", pkg: "", type: $funcType([$String, $emptyInterface], [JQuery], false)}, {prop: "SetHeight", name: "SetHeight", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "SetHtml", name: "SetHtml", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "SetOffset", name: "SetOffset", pkg: "", type: $funcType([JQueryCoordinates], [JQuery], false)}, {prop: "SetProp", name: "SetProp", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "SetScrollLeft", name: "SetScrollLeft", pkg: "", type: $funcType([$Int], [JQuery], false)}, {prop: "SetScrollTop", name: "SetScrollTop", pkg: "", type: $funcType([$Int], [JQuery], false)}, {prop: "SetText", name: "SetText", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "SetVal", name: "SetVal", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "SetWidth", name: "SetWidth", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "Show", name: "Show", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Siblings", name: "Siblings", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Slice", name: "Slice", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Stop", name: "Stop", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Submit", name: "Submit", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Text", name: "Text", pkg: "", type: $funcType([], [$String], false)}, {prop: "ToArray", name: "ToArray", pkg: "", type: $funcType([], [sliceType], false)}, {prop: "Toggle", name: "Toggle", pkg: "", type: $funcType([$Bool], [JQuery], false)}, {prop: "ToggleClass", name: "ToggleClass", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Trigger", name: "Trigger", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Underlying", name: "Underlying", pkg: "", type: $funcType([], [js.Object], false)}, {prop: "Unwrap", name: "Unwrap", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Val", name: "Val", pkg: "", type: $funcType([], [$String], false)}, {prop: "Width", name: "Width", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Wrap", name: "Wrap", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "WrapAll", name: "WrapAll", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "WrapInner", name: "WrapInner", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}];
+	ptrType.methods = [{prop: "Add", name: "Add", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "AddBack", name: "AddBack", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "AddClass", name: "AddClass", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "After", name: "After", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Append", name: "Append", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "AppendTo", name: "AppendTo", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "Attr", name: "Attr", pkg: "", type: $funcType([$String], [$String], false)}, {prop: "Before", name: "Before", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Blur", name: "Blur", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Children", name: "Children", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "ClearQueue", name: "ClearQueue", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "Clone", name: "Clone", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Closest", name: "Closest", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Contents", name: "Contents", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Css", name: "Css", pkg: "", type: $funcType([$String], [$String], false)}, {prop: "CssArray", name: "CssArray", pkg: "", type: $funcType([sliceType$1], [mapType], true)}, {prop: "Data", name: "Data", pkg: "", type: $funcType([$String], [$emptyInterface], false)}, {prop: "Delay", name: "Delay", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Dequeue", name: "Dequeue", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "Detach", name: "Detach", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Each", name: "Each", pkg: "", type: $funcType([funcType$1], [JQuery], false)}, {prop: "Empty", name: "Empty", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "End", name: "End", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Eq", name: "Eq", pkg: "", type: $funcType([$Int], [JQuery], false)}, {prop: "FadeIn", name: "FadeIn", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "FadeOut", name: "FadeOut", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Filter", name: "Filter", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Find", name: "Find", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "First", name: "First", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Focus", name: "Focus", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Get", name: "Get", pkg: "", type: $funcType([sliceType], [js.Object], true)}, {prop: "Has", name: "Has", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "HasClass", name: "HasClass", pkg: "", type: $funcType([$String], [$Bool], false)}, {prop: "Height", name: "Height", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Hide", name: "Hide", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Html", name: "Html", pkg: "", type: $funcType([], [$String], false)}, {prop: "InnerHeight", name: "InnerHeight", pkg: "", type: $funcType([], [$Int], false)}, {prop: "InnerWidth", name: "InnerWidth", pkg: "", type: $funcType([], [$Int], false)}, {prop: "InsertAfter", name: "InsertAfter", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "InsertBefore", name: "InsertBefore", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "Is", name: "Is", pkg: "", type: $funcType([sliceType], [$Bool], true)}, {prop: "Last", name: "Last", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Load", name: "Load", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Next", name: "Next", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "NextAll", name: "NextAll", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "NextUntil", name: "NextUntil", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Not", name: "Not", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Off", name: "Off", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Offset", name: "Offset", pkg: "", type: $funcType([], [JQueryCoordinates], false)}, {prop: "OffsetParent", name: "OffsetParent", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "On", name: "On", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "One", name: "One", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "OuterHeight", name: "OuterHeight", pkg: "", type: $funcType([sliceType$2], [$Int], true)}, {prop: "OuterWidth", name: "OuterWidth", pkg: "", type: $funcType([sliceType$2], [$Int], true)}, {prop: "Parent", name: "Parent", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Parents", name: "Parents", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "ParentsUntil", name: "ParentsUntil", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Position", name: "Position", pkg: "", type: $funcType([], [JQueryCoordinates], false)}, {prop: "Prepend", name: "Prepend", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "PrependTo", name: "PrependTo", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "Prev", name: "Prev", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "PrevAll", name: "PrevAll", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "PrevUntil", name: "PrevUntil", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Prop", name: "Prop", pkg: "", type: $funcType([$String], [$emptyInterface], false)}, {prop: "Ready", name: "Ready", pkg: "", type: $funcType([funcType$3], [JQuery], false)}, {prop: "Remove", name: "Remove", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "RemoveAttr", name: "RemoveAttr", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "RemoveClass", name: "RemoveClass", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "RemoveData", name: "RemoveData", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "RemoveProp", name: "RemoveProp", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "ReplaceAll", name: "ReplaceAll", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "ReplaceWith", name: "ReplaceWith", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "Resize", name: "Resize", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Scroll", name: "Scroll", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "ScrollLeft", name: "ScrollLeft", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ScrollTop", name: "ScrollTop", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Select", name: "Select", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Serialize", name: "Serialize", pkg: "", type: $funcType([], [$String], false)}, {prop: "SerializeArray", name: "SerializeArray", pkg: "", type: $funcType([], [js.Object], false)}, {prop: "SetAttr", name: "SetAttr", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "SetCss", name: "SetCss", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "SetData", name: "SetData", pkg: "", type: $funcType([$String, $emptyInterface], [JQuery], false)}, {prop: "SetHeight", name: "SetHeight", pkg: "", type: $funcType([$String], [JQuery], false)}, {prop: "SetHtml", name: "SetHtml", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "SetOffset", name: "SetOffset", pkg: "", type: $funcType([JQueryCoordinates], [JQuery], false)}, {prop: "SetProp", name: "SetProp", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "SetScrollLeft", name: "SetScrollLeft", pkg: "", type: $funcType([$Int], [JQuery], false)}, {prop: "SetScrollTop", name: "SetScrollTop", pkg: "", type: $funcType([$Int], [JQuery], false)}, {prop: "SetText", name: "SetText", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "SetVal", name: "SetVal", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "SetWidth", name: "SetWidth", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "Show", name: "Show", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Siblings", name: "Siblings", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Slice", name: "Slice", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Stop", name: "Stop", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Submit", name: "Submit", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Text", name: "Text", pkg: "", type: $funcType([], [$String], false)}, {prop: "ToArray", name: "ToArray", pkg: "", type: $funcType([], [sliceType], false)}, {prop: "Toggle", name: "Toggle", pkg: "", type: $funcType([$Bool], [JQuery], false)}, {prop: "ToggleClass", name: "ToggleClass", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Trigger", name: "Trigger", pkg: "", type: $funcType([sliceType], [JQuery], true)}, {prop: "Underlying", name: "Underlying", pkg: "", type: $funcType([], [js.Object], false)}, {prop: "Unwrap", name: "Unwrap", pkg: "", type: $funcType([], [JQuery], false)}, {prop: "Val", name: "Val", pkg: "", type: $funcType([], [$String], false)}, {prop: "Width", name: "Width", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Wrap", name: "Wrap", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "WrapAll", name: "WrapAll", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}, {prop: "WrapInner", name: "WrapInner", pkg: "", type: $funcType([$emptyInterface], [JQuery], false)}];
+	Event.methods = [{prop: "Bool", name: "Bool", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Call", name: "Call", pkg: "", type: $funcType([$String, sliceType], [js.Object], true)}, {prop: "Delete", name: "Delete", pkg: "", type: $funcType([$String], [], false)}, {prop: "Float", name: "Float", pkg: "", type: $funcType([], [$Float64], false)}, {prop: "Get", name: "Get", pkg: "", type: $funcType([$String], [js.Object], false)}, {prop: "Index", name: "Index", pkg: "", type: $funcType([$Int], [js.Object], false)}, {prop: "Int", name: "Int", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Int64", name: "Int64", pkg: "", type: $funcType([], [$Int64], false)}, {prop: "Interface", name: "Interface", pkg: "", type: $funcType([], [$emptyInterface], false)}, {prop: "Invoke", name: "Invoke", pkg: "", type: $funcType([sliceType], [js.Object], true)}, {prop: "Length", name: "Length", pkg: "", type: $funcType([], [$Int], false)}, {prop: "New", name: "New", pkg: "", type: $funcType([sliceType], [js.Object], true)}, {prop: "Set", name: "Set", pkg: "", type: $funcType([$String, $emptyInterface], [], false)}, {prop: "SetIndex", name: "SetIndex", pkg: "", type: $funcType([$Int, $emptyInterface], [], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "Uint64", name: "Uint64", pkg: "", type: $funcType([], [$Uint64], false)}, {prop: "Unsafe", name: "Unsafe", pkg: "", type: $funcType([], [$Uintptr], false)}];
+	ptrType$1.methods = [{prop: "Bool", name: "Bool", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Call", name: "Call", pkg: "", type: $funcType([$String, sliceType], [js.Object], true)}, {prop: "Delete", name: "Delete", pkg: "", type: $funcType([$String], [], false)}, {prop: "Float", name: "Float", pkg: "", type: $funcType([], [$Float64], false)}, {prop: "Get", name: "Get", pkg: "", type: $funcType([$String], [js.Object], false)}, {prop: "Index", name: "Index", pkg: "", type: $funcType([$Int], [js.Object], false)}, {prop: "Int", name: "Int", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Int64", name: "Int64", pkg: "", type: $funcType([], [$Int64], false)}, {prop: "Interface", name: "Interface", pkg: "", type: $funcType([], [$emptyInterface], false)}, {prop: "Invoke", name: "Invoke", pkg: "", type: $funcType([sliceType], [js.Object], true)}, {prop: "IsDefaultPrevented", name: "IsDefaultPrevented", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "IsImmediatePropogationStopped", name: "IsImmediatePropogationStopped", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "IsPropagationStopped", name: "IsPropagationStopped", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Length", name: "Length", pkg: "", type: $funcType([], [$Int], false)}, {prop: "New", name: "New", pkg: "", type: $funcType([sliceType], [js.Object], true)}, {prop: "PreventDefault", name: "PreventDefault", pkg: "", type: $funcType([], [], false)}, {prop: "Set", name: "Set", pkg: "", type: $funcType([$String, $emptyInterface], [], false)}, {prop: "SetIndex", name: "SetIndex", pkg: "", type: $funcType([$Int, $emptyInterface], [], false)}, {prop: "StopImmediatePropagation", name: "StopImmediatePropagation", pkg: "", type: $funcType([], [], false)}, {prop: "StopPropagation", name: "StopPropagation", pkg: "", type: $funcType([], [], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "Uint64", name: "Uint64", pkg: "", type: $funcType([], [$Uint64], false)}, {prop: "Unsafe", name: "Unsafe", pkg: "", type: $funcType([], [$Uintptr], false)}];
+	JQuery.init([{prop: "o", name: "o", pkg: "github.com/gopherjs/jquery", type: js.Object, tag: ""}, {prop: "Jquery", name: "Jquery", pkg: "", type: $String, tag: "js:\"jquery\""}, {prop: "Selector", name: "Selector", pkg: "", type: $String, tag: "js:\"selector\""}, {prop: "Length", name: "Length", pkg: "", type: $Int, tag: "js:\"length\""}, {prop: "Context", name: "Context", pkg: "", type: $String, tag: "js:\"context\""}]);
+	Event.init([{prop: "Object", name: "", pkg: "", type: js.Object, tag: ""}, {prop: "KeyCode", name: "KeyCode", pkg: "", type: $Int, tag: "js:\"keyCode\""}, {prop: "Target", name: "Target", pkg: "", type: js.Object, tag: "js:\"target\""}, {prop: "CurrentTarget", name: "CurrentTarget", pkg: "", type: js.Object, tag: "js:\"currentTarget\""}, {prop: "DelegateTarget", name: "DelegateTarget", pkg: "", type: js.Object, tag: "js:\"delegateTarget\""}, {prop: "RelatedTarget", name: "RelatedTarget", pkg: "", type: js.Object, tag: "js:\"relatedTarget\""}, {prop: "Data", name: "Data", pkg: "", type: js.Object, tag: "js:\"data\""}, {prop: "Result", name: "Result", pkg: "", type: js.Object, tag: "js:\"result\""}, {prop: "Which", name: "Which", pkg: "", type: $Int, tag: "js:\"which\""}, {prop: "Namespace", name: "Namespace", pkg: "", type: $String, tag: "js:\"namespace\""}, {prop: "MetaKey", name: "MetaKey", pkg: "", type: $Bool, tag: "js:\"metaKey\""}, {prop: "PageX", name: "PageX", pkg: "", type: $Int, tag: "js:\"pageX\""}, {prop: "PageY", name: "PageY", pkg: "", type: $Int, tag: "js:\"pageY\""}, {prop: "Type", name: "Type", pkg: "", type: $String, tag: "js:\"type\""}]);
+	JQueryCoordinates.init([{prop: "Left", name: "Left", pkg: "", type: $Int, tag: ""}, {prop: "Top", name: "Top", pkg: "", type: $Int, tag: ""}]);
 	$pkg.$init = function() {
-		JQuery.methods = [["Add", "Add", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["AddBack", "AddBack", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["AddClass", "AddClass", "", $funcType([$emptyInterface], [JQuery], false), -1], ["After", "After", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Append", "Append", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["AppendTo", "AppendTo", "", $funcType([$emptyInterface], [JQuery], false), -1], ["Attr", "Attr", "", $funcType([$String], [$String], false), -1], ["Before", "Before", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Blur", "Blur", "", $funcType([], [JQuery], false), -1], ["Children", "Children", "", $funcType([$emptyInterface], [JQuery], false), -1], ["ClearQueue", "ClearQueue", "", $funcType([$String], [JQuery], false), -1], ["Clone", "Clone", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Closest", "Closest", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Contents", "Contents", "", $funcType([], [JQuery], false), -1], ["Css", "Css", "", $funcType([$String], [$String], false), -1], ["CssArray", "CssArray", "", $funcType([($sliceType($String))], [($mapType($String, $emptyInterface))], true), -1], ["Data", "Data", "", $funcType([$String], [$emptyInterface], false), -1], ["Delay", "Delay", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Dequeue", "Dequeue", "", $funcType([$String], [JQuery], false), -1], ["Detach", "Detach", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Each", "Each", "", $funcType([($funcType([$Int, JQuery], [], false))], [JQuery], false), -1], ["Empty", "Empty", "", $funcType([], [JQuery], false), -1], ["End", "End", "", $funcType([], [JQuery], false), -1], ["Eq", "Eq", "", $funcType([$Int], [JQuery], false), -1], ["FadeIn", "FadeIn", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["FadeOut", "FadeOut", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Filter", "Filter", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Find", "Find", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["First", "First", "", $funcType([], [JQuery], false), -1], ["Focus", "Focus", "", $funcType([], [JQuery], false), -1], ["Get", "Get", "", $funcType([($sliceType($emptyInterface))], [js.Object], true), -1], ["Has", "Has", "", $funcType([$String], [JQuery], false), -1], ["HasClass", "HasClass", "", $funcType([$String], [$Bool], false), -1], ["Height", "Height", "", $funcType([], [$Int], false), -1], ["Hide", "Hide", "", $funcType([], [JQuery], false), -1], ["Html", "Html", "", $funcType([], [$String], false), -1], ["InnerHeight", "InnerHeight", "", $funcType([], [$Int], false), -1], ["InnerWidth", "InnerWidth", "", $funcType([], [$Int], false), -1], ["InsertAfter", "InsertAfter", "", $funcType([$emptyInterface], [JQuery], false), -1], ["InsertBefore", "InsertBefore", "", $funcType([$emptyInterface], [JQuery], false), -1], ["Is", "Is", "", $funcType([($sliceType($emptyInterface))], [$Bool], true), -1], ["Last", "Last", "", $funcType([], [JQuery], false), -1], ["Load", "Load", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Next", "Next", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["NextAll", "NextAll", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["NextUntil", "NextUntil", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Not", "Not", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Off", "Off", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Offset", "Offset", "", $funcType([], [JQueryCoordinates], false), -1], ["OffsetParent", "OffsetParent", "", $funcType([], [JQuery], false), -1], ["On", "On", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["One", "One", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["OuterHeight", "OuterHeight", "", $funcType([($sliceType($Bool))], [$Int], true), -1], ["OuterWidth", "OuterWidth", "", $funcType([($sliceType($Bool))], [$Int], true), -1], ["Parent", "Parent", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Parents", "Parents", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["ParentsUntil", "ParentsUntil", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Position", "Position", "", $funcType([], [JQueryCoordinates], false), -1], ["Prepend", "Prepend", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["PrependTo", "PrependTo", "", $funcType([$emptyInterface], [JQuery], false), -1], ["Prev", "Prev", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["PrevAll", "PrevAll", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["PrevUntil", "PrevUntil", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Prop", "Prop", "", $funcType([$String], [$emptyInterface], false), -1], ["Ready", "Ready", "", $funcType([($funcType([], [], false))], [JQuery], false), -1], ["Remove", "Remove", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["RemoveAttr", "RemoveAttr", "", $funcType([$String], [JQuery], false), -1], ["RemoveClass", "RemoveClass", "", $funcType([$String], [JQuery], false), -1], ["RemoveData", "RemoveData", "", $funcType([$String], [JQuery], false), -1], ["RemoveProp", "RemoveProp", "", $funcType([$String], [JQuery], false), -1], ["ReplaceAll", "ReplaceAll", "", $funcType([$emptyInterface], [JQuery], false), -1], ["ReplaceWith", "ReplaceWith", "", $funcType([$emptyInterface], [JQuery], false), -1], ["Resize", "Resize", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Scroll", "Scroll", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["ScrollLeft", "ScrollLeft", "", $funcType([], [$Int], false), -1], ["ScrollTop", "ScrollTop", "", $funcType([], [$Int], false), -1], ["Select", "Select", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Serialize", "Serialize", "", $funcType([], [$String], false), -1], ["SerializeArray", "SerializeArray", "", $funcType([], [js.Object], false), -1], ["SetAttr", "SetAttr", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["SetCss", "SetCss", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["SetData", "SetData", "", $funcType([$String, $emptyInterface], [JQuery], false), -1], ["SetHeight", "SetHeight", "", $funcType([$String], [JQuery], false), -1], ["SetHtml", "SetHtml", "", $funcType([$emptyInterface], [JQuery], false), -1], ["SetOffset", "SetOffset", "", $funcType([JQueryCoordinates], [JQuery], false), -1], ["SetProp", "SetProp", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["SetScrollLeft", "SetScrollLeft", "", $funcType([$Int], [JQuery], false), -1], ["SetScrollTop", "SetScrollTop", "", $funcType([$Int], [JQuery], false), -1], ["SetText", "SetText", "", $funcType([$emptyInterface], [JQuery], false), -1], ["SetVal", "SetVal", "", $funcType([$emptyInterface], [JQuery], false), -1], ["SetWidth", "SetWidth", "", $funcType([$emptyInterface], [JQuery], false), -1], ["Show", "Show", "", $funcType([], [JQuery], false), -1], ["Siblings", "Siblings", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Slice", "Slice", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Stop", "Stop", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Submit", "Submit", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Text", "Text", "", $funcType([], [$String], false), -1], ["ToArray", "ToArray", "", $funcType([], [($sliceType($emptyInterface))], false), -1], ["Toggle", "Toggle", "", $funcType([$Bool], [JQuery], false), -1], ["ToggleClass", "ToggleClass", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Trigger", "Trigger", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Underlying", "Underlying", "", $funcType([], [js.Object], false), -1], ["Unwrap", "Unwrap", "", $funcType([], [JQuery], false), -1], ["Val", "Val", "", $funcType([], [$String], false), -1], ["Width", "Width", "", $funcType([], [$Int], false), -1], ["Wrap", "Wrap", "", $funcType([$emptyInterface], [JQuery], false), -1], ["WrapAll", "WrapAll", "", $funcType([$emptyInterface], [JQuery], false), -1], ["WrapInner", "WrapInner", "", $funcType([$emptyInterface], [JQuery], false), -1], ["dom1arg", "dom1arg", "github.com/gopherjs/jquery", $funcType([$String, $emptyInterface], [JQuery], false), -1], ["dom2args", "dom2args", "github.com/gopherjs/jquery", $funcType([$String, ($sliceType($emptyInterface))], [JQuery], true), -1], ["events", "events", "github.com/gopherjs/jquery", $funcType([$String, ($sliceType($emptyInterface))], [JQuery], true), -1], ["handleEvent", "handleEvent", "github.com/gopherjs/jquery", $funcType([$String, ($sliceType($emptyInterface))], [JQuery], true), -1]];
-		($ptrType(JQuery)).methods = [["Add", "Add", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["AddBack", "AddBack", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["AddClass", "AddClass", "", $funcType([$emptyInterface], [JQuery], false), -1], ["After", "After", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Append", "Append", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["AppendTo", "AppendTo", "", $funcType([$emptyInterface], [JQuery], false), -1], ["Attr", "Attr", "", $funcType([$String], [$String], false), -1], ["Before", "Before", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Blur", "Blur", "", $funcType([], [JQuery], false), -1], ["Children", "Children", "", $funcType([$emptyInterface], [JQuery], false), -1], ["ClearQueue", "ClearQueue", "", $funcType([$String], [JQuery], false), -1], ["Clone", "Clone", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Closest", "Closest", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Contents", "Contents", "", $funcType([], [JQuery], false), -1], ["Css", "Css", "", $funcType([$String], [$String], false), -1], ["CssArray", "CssArray", "", $funcType([($sliceType($String))], [($mapType($String, $emptyInterface))], true), -1], ["Data", "Data", "", $funcType([$String], [$emptyInterface], false), -1], ["Delay", "Delay", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Dequeue", "Dequeue", "", $funcType([$String], [JQuery], false), -1], ["Detach", "Detach", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Each", "Each", "", $funcType([($funcType([$Int, JQuery], [], false))], [JQuery], false), -1], ["Empty", "Empty", "", $funcType([], [JQuery], false), -1], ["End", "End", "", $funcType([], [JQuery], false), -1], ["Eq", "Eq", "", $funcType([$Int], [JQuery], false), -1], ["FadeIn", "FadeIn", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["FadeOut", "FadeOut", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Filter", "Filter", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Find", "Find", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["First", "First", "", $funcType([], [JQuery], false), -1], ["Focus", "Focus", "", $funcType([], [JQuery], false), -1], ["Get", "Get", "", $funcType([($sliceType($emptyInterface))], [js.Object], true), -1], ["Has", "Has", "", $funcType([$String], [JQuery], false), -1], ["HasClass", "HasClass", "", $funcType([$String], [$Bool], false), -1], ["Height", "Height", "", $funcType([], [$Int], false), -1], ["Hide", "Hide", "", $funcType([], [JQuery], false), -1], ["Html", "Html", "", $funcType([], [$String], false), -1], ["InnerHeight", "InnerHeight", "", $funcType([], [$Int], false), -1], ["InnerWidth", "InnerWidth", "", $funcType([], [$Int], false), -1], ["InsertAfter", "InsertAfter", "", $funcType([$emptyInterface], [JQuery], false), -1], ["InsertBefore", "InsertBefore", "", $funcType([$emptyInterface], [JQuery], false), -1], ["Is", "Is", "", $funcType([($sliceType($emptyInterface))], [$Bool], true), -1], ["Last", "Last", "", $funcType([], [JQuery], false), -1], ["Load", "Load", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Next", "Next", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["NextAll", "NextAll", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["NextUntil", "NextUntil", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Not", "Not", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Off", "Off", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Offset", "Offset", "", $funcType([], [JQueryCoordinates], false), -1], ["OffsetParent", "OffsetParent", "", $funcType([], [JQuery], false), -1], ["On", "On", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["One", "One", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["OuterHeight", "OuterHeight", "", $funcType([($sliceType($Bool))], [$Int], true), -1], ["OuterWidth", "OuterWidth", "", $funcType([($sliceType($Bool))], [$Int], true), -1], ["Parent", "Parent", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Parents", "Parents", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["ParentsUntil", "ParentsUntil", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Position", "Position", "", $funcType([], [JQueryCoordinates], false), -1], ["Prepend", "Prepend", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["PrependTo", "PrependTo", "", $funcType([$emptyInterface], [JQuery], false), -1], ["Prev", "Prev", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["PrevAll", "PrevAll", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["PrevUntil", "PrevUntil", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Prop", "Prop", "", $funcType([$String], [$emptyInterface], false), -1], ["Ready", "Ready", "", $funcType([($funcType([], [], false))], [JQuery], false), -1], ["Remove", "Remove", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["RemoveAttr", "RemoveAttr", "", $funcType([$String], [JQuery], false), -1], ["RemoveClass", "RemoveClass", "", $funcType([$String], [JQuery], false), -1], ["RemoveData", "RemoveData", "", $funcType([$String], [JQuery], false), -1], ["RemoveProp", "RemoveProp", "", $funcType([$String], [JQuery], false), -1], ["ReplaceAll", "ReplaceAll", "", $funcType([$emptyInterface], [JQuery], false), -1], ["ReplaceWith", "ReplaceWith", "", $funcType([$emptyInterface], [JQuery], false), -1], ["Resize", "Resize", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Scroll", "Scroll", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["ScrollLeft", "ScrollLeft", "", $funcType([], [$Int], false), -1], ["ScrollTop", "ScrollTop", "", $funcType([], [$Int], false), -1], ["Select", "Select", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Serialize", "Serialize", "", $funcType([], [$String], false), -1], ["SerializeArray", "SerializeArray", "", $funcType([], [js.Object], false), -1], ["SetAttr", "SetAttr", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["SetCss", "SetCss", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["SetData", "SetData", "", $funcType([$String, $emptyInterface], [JQuery], false), -1], ["SetHeight", "SetHeight", "", $funcType([$String], [JQuery], false), -1], ["SetHtml", "SetHtml", "", $funcType([$emptyInterface], [JQuery], false), -1], ["SetOffset", "SetOffset", "", $funcType([JQueryCoordinates], [JQuery], false), -1], ["SetProp", "SetProp", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["SetScrollLeft", "SetScrollLeft", "", $funcType([$Int], [JQuery], false), -1], ["SetScrollTop", "SetScrollTop", "", $funcType([$Int], [JQuery], false), -1], ["SetText", "SetText", "", $funcType([$emptyInterface], [JQuery], false), -1], ["SetVal", "SetVal", "", $funcType([$emptyInterface], [JQuery], false), -1], ["SetWidth", "SetWidth", "", $funcType([$emptyInterface], [JQuery], false), -1], ["Show", "Show", "", $funcType([], [JQuery], false), -1], ["Siblings", "Siblings", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Slice", "Slice", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Stop", "Stop", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Submit", "Submit", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Text", "Text", "", $funcType([], [$String], false), -1], ["ToArray", "ToArray", "", $funcType([], [($sliceType($emptyInterface))], false), -1], ["Toggle", "Toggle", "", $funcType([$Bool], [JQuery], false), -1], ["ToggleClass", "ToggleClass", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Trigger", "Trigger", "", $funcType([($sliceType($emptyInterface))], [JQuery], true), -1], ["Underlying", "Underlying", "", $funcType([], [js.Object], false), -1], ["Unwrap", "Unwrap", "", $funcType([], [JQuery], false), -1], ["Val", "Val", "", $funcType([], [$String], false), -1], ["Width", "Width", "", $funcType([], [$Int], false), -1], ["Wrap", "Wrap", "", $funcType([$emptyInterface], [JQuery], false), -1], ["WrapAll", "WrapAll", "", $funcType([$emptyInterface], [JQuery], false), -1], ["WrapInner", "WrapInner", "", $funcType([$emptyInterface], [JQuery], false), -1], ["dom1arg", "dom1arg", "github.com/gopherjs/jquery", $funcType([$String, $emptyInterface], [JQuery], false), -1], ["dom2args", "dom2args", "github.com/gopherjs/jquery", $funcType([$String, ($sliceType($emptyInterface))], [JQuery], true), -1], ["events", "events", "github.com/gopherjs/jquery", $funcType([$String, ($sliceType($emptyInterface))], [JQuery], true), -1], ["handleEvent", "handleEvent", "github.com/gopherjs/jquery", $funcType([$String, ($sliceType($emptyInterface))], [JQuery], true), -1]];
-		JQuery.init([["o", "o", "github.com/gopherjs/jquery", js.Object, ""], ["Jquery", "Jquery", "", $String, "js:\"jquery\""], ["Selector", "Selector", "", $String, "js:\"selector\""], ["Length", "Length", "", $Int, "js:\"length\""], ["Context", "Context", "", $String, "js:\"context\""]]);
-		Event.methods = [["Bool", "Bool", "", $funcType([], [$Bool], false), 0], ["Call", "Call", "", $funcType([$String, ($sliceType($emptyInterface))], [js.Object], true), 0], ["Delete", "Delete", "", $funcType([$String], [], false), 0], ["Float", "Float", "", $funcType([], [$Float64], false), 0], ["Get", "Get", "", $funcType([$String], [js.Object], false), 0], ["Index", "Index", "", $funcType([$Int], [js.Object], false), 0], ["Int", "Int", "", $funcType([], [$Int], false), 0], ["Int64", "Int64", "", $funcType([], [$Int64], false), 0], ["Interface", "Interface", "", $funcType([], [$emptyInterface], false), 0], ["Invoke", "Invoke", "", $funcType([($sliceType($emptyInterface))], [js.Object], true), 0], ["IsNull", "IsNull", "", $funcType([], [$Bool], false), 0], ["IsUndefined", "IsUndefined", "", $funcType([], [$Bool], false), 0], ["Length", "Length", "", $funcType([], [$Int], false), 0], ["New", "New", "", $funcType([($sliceType($emptyInterface))], [js.Object], true), 0], ["Set", "Set", "", $funcType([$String, $emptyInterface], [], false), 0], ["SetIndex", "SetIndex", "", $funcType([$Int, $emptyInterface], [], false), 0], ["Str", "Str", "", $funcType([], [$String], false), 0], ["Uint64", "Uint64", "", $funcType([], [$Uint64], false), 0], ["Unsafe", "Unsafe", "", $funcType([], [$Uintptr], false), 0]];
-		($ptrType(Event)).methods = [["Bool", "Bool", "", $funcType([], [$Bool], false), 0], ["Call", "Call", "", $funcType([$String, ($sliceType($emptyInterface))], [js.Object], true), 0], ["Delete", "Delete", "", $funcType([$String], [], false), 0], ["Float", "Float", "", $funcType([], [$Float64], false), 0], ["Get", "Get", "", $funcType([$String], [js.Object], false), 0], ["Index", "Index", "", $funcType([$Int], [js.Object], false), 0], ["Int", "Int", "", $funcType([], [$Int], false), 0], ["Int64", "Int64", "", $funcType([], [$Int64], false), 0], ["Interface", "Interface", "", $funcType([], [$emptyInterface], false), 0], ["Invoke", "Invoke", "", $funcType([($sliceType($emptyInterface))], [js.Object], true), 0], ["IsDefaultPrevented", "IsDefaultPrevented", "", $funcType([], [$Bool], false), -1], ["IsImmediatePropogationStopped", "IsImmediatePropogationStopped", "", $funcType([], [$Bool], false), -1], ["IsNull", "IsNull", "", $funcType([], [$Bool], false), 0], ["IsPropagationStopped", "IsPropagationStopped", "", $funcType([], [$Bool], false), -1], ["IsUndefined", "IsUndefined", "", $funcType([], [$Bool], false), 0], ["Length", "Length", "", $funcType([], [$Int], false), 0], ["New", "New", "", $funcType([($sliceType($emptyInterface))], [js.Object], true), 0], ["PreventDefault", "PreventDefault", "", $funcType([], [], false), -1], ["Set", "Set", "", $funcType([$String, $emptyInterface], [], false), 0], ["SetIndex", "SetIndex", "", $funcType([$Int, $emptyInterface], [], false), 0], ["StopImmediatePropagation", "StopImmediatePropagation", "", $funcType([], [], false), -1], ["StopPropagation", "StopPropagation", "", $funcType([], [], false), -1], ["Str", "Str", "", $funcType([], [$String], false), 0], ["Uint64", "Uint64", "", $funcType([], [$Uint64], false), 0], ["Unsafe", "Unsafe", "", $funcType([], [$Uintptr], false), 0]];
-		Event.init([["Object", "", "", js.Object, ""], ["KeyCode", "KeyCode", "", $Int, "js:\"keyCode\""], ["Target", "Target", "", js.Object, "js:\"target\""], ["CurrentTarget", "CurrentTarget", "", js.Object, "js:\"currentTarget\""], ["DelegateTarget", "DelegateTarget", "", js.Object, "js:\"delegateTarget\""], ["RelatedTarget", "RelatedTarget", "", js.Object, "js:\"relatedTarget\""], ["Data", "Data", "", js.Object, "js:\"data\""], ["Result", "Result", "", js.Object, "js:\"result\""], ["Which", "Which", "", $Int, "js:\"which\""], ["Namespace", "Namespace", "", $String, "js:\"namespace\""], ["MetaKey", "MetaKey", "", $Bool, "js:\"metaKey\""], ["PageX", "PageX", "", $Int, "js:\"pageX\""], ["PageY", "PageY", "", $Int, "js:\"pageY\""], ["Type", "Type", "", $String, "js:\"type\""]]);
-		JQueryCoordinates.init([["Left", "Left", "", $Int, ""], ["Top", "Top", "", $Int, ""]]);
+		$pkg.$init = function() {};
+		/* */ var $r, $s = 0; var $init_jquery = function() { while (true) { switch ($s) { case 0:
+		$r = js.$init($BLOCKING); /* */ $s = 1; case 1: if ($r && $r.$blocking) { $r = $r(); }
+		/* */ } return; } }; $init_jquery.$blocking = true; return $init_jquery;
 	};
 	return $pkg;
 })();
 $packages["math"] = (function() {
-	var $pkg = {}, js = $packages["github.com/gopherjs/gopherjs/js"], math, zero, negInf, nan, pow10tab, init, Ldexp, Float32bits, Float32frombits, init$1;
+	var $pkg = {}, js, arrayType, math, zero, posInf, negInf, nan, pow10tab, init, Ldexp, Float32bits, Float32frombits, init$1;
+	js = $packages["github.com/gopherjs/gopherjs/js"];
+	arrayType = $arrayType($Float64, 70);
 	init = function() {
 		Float32bits(0);
 		Float32frombits(0);
@@ -2953,14 +3063,14 @@ $packages["math"] = (function() {
 		return frac * $parseFloat(math.pow(2, exp$1));
 	};
 	Float32bits = $pkg.Float32bits = function(f) {
-		var s, e, r;
-		if ($float32IsEqual(f, 0)) {
-			if ($float32IsEqual(1 / f, negInf)) {
+		var e, r, s;
+		if (f === 0) {
+			if (1 / f === negInf) {
 				return 2147483648;
 			}
 			return 0;
 		}
-		if (!(($float32IsEqual(f, f)))) {
+		if (!(f === f)) {
 			return 2143289344;
 		}
 		s = 0;
@@ -2971,10 +3081,13 @@ $packages["math"] = (function() {
 		e = 150;
 		while (f >= 1.6777216e+07) {
 			f = f / (2);
+			e = e + (1) >>> 0;
 			if (e === 255) {
+				if (f >= 8.388608e+06) {
+					f = posInf;
+				}
 				break;
 			}
-			e = e + (1) >>> 0;
 		}
 		while (f < 8.388608e+06) {
 			e = e - (1) >>> 0;
@@ -2990,7 +3103,7 @@ $packages["math"] = (function() {
 		return (((s | (e << 23 >>> 0)) >>> 0) | (((f >> 0) & ~8388608))) >>> 0;
 	};
 	Float32frombits = $pkg.Float32frombits = function(b) {
-		var s, e, m;
+		var e, m, s;
 		s = 1;
 		if (!((((b & 2147483648) >>> 0) === 0))) {
 			s = -1;
@@ -3012,7 +3125,7 @@ $packages["math"] = (function() {
 		return Ldexp(m, ((e >> 0) - 127 >> 0) - 23 >> 0) * s;
 	};
 	init$1 = function() {
-		var i, _q, m, x;
+		var _q, i, m, x;
 		pow10tab[0] = 1;
 		pow10tab[1] = 10;
 		i = 2;
@@ -3023,41 +3136,50 @@ $packages["math"] = (function() {
 		}
 	};
 	$pkg.$init = function() {
-		pow10tab = ($arrayType($Float64, 70)).zero();
+		$pkg.$init = function() {};
+		/* */ var $r, $s = 0; var $init_math = function() { while (true) { switch ($s) { case 0:
+		$r = js.$init($BLOCKING); /* */ $s = 1; case 1: if ($r && $r.$blocking) { $r = $r(); }
+		pow10tab = arrayType.zero();
 		math = $global.Math;
 		zero = 0;
+		posInf = 1 / zero;
 		negInf = -1 / zero;
 		nan = 0 / zero;
 		init();
 		init$1();
+		/* */ } return; } }; $init_math.$blocking = true; return $init_math;
 	};
 	return $pkg;
 })();
 $packages["errors"] = (function() {
-	var $pkg = {}, errorString, New;
-	errorString = $pkg.errorString = $newType(0, "Struct", "errors.errorString", "errorString", "errors", function(s_) {
+	var $pkg = {}, errorString, ptrType, New;
+	errorString = $pkg.errorString = $newType(0, $kindStruct, "errors.errorString", "errorString", "errors", function(s_) {
 		this.$val = this;
 		this.s = s_ !== undefined ? s_ : "";
 	});
+	ptrType = $ptrType(errorString);
 	New = $pkg.New = function(text) {
-		return new errorString.Ptr(text);
+		return new errorString.ptr(text);
 	};
-	errorString.Ptr.prototype.Error = function() {
+	errorString.ptr.prototype.Error = function() {
 		var e;
 		e = this;
 		return e.s;
 	};
 	errorString.prototype.Error = function() { return this.$val.Error(); };
+	ptrType.methods = [{prop: "Error", name: "Error", pkg: "", type: $funcType([], [$String], false)}];
+	errorString.init([{prop: "s", name: "s", pkg: "errors", type: $String, tag: ""}]);
 	$pkg.$init = function() {
-		($ptrType(errorString)).methods = [["Error", "Error", "", $funcType([], [$String], false), -1]];
-		errorString.init([["s", "s", "errors", $String, ""]]);
+		$pkg.$init = function() {};
+		/* */ var $r, $s = 0; var $init_errors = function() { while (true) { switch ($s) { case 0:
+		/* */ } return; } }; $init_errors.$blocking = true; return $init_errors;
 	};
 	return $pkg;
 })();
 $packages["unicode/utf8"] = (function() {
 	var $pkg = {}, decodeRuneInStringInternal, DecodeRuneInString, EncodeRune;
 	decodeRuneInStringInternal = function(s) {
-		var r = 0, size = 0, short$1 = false, n, _tmp, _tmp$1, _tmp$2, c0, _tmp$3, _tmp$4, _tmp$5, _tmp$6, _tmp$7, _tmp$8, _tmp$9, _tmp$10, _tmp$11, c1, _tmp$12, _tmp$13, _tmp$14, _tmp$15, _tmp$16, _tmp$17, _tmp$18, _tmp$19, _tmp$20, _tmp$21, _tmp$22, _tmp$23, c2, _tmp$24, _tmp$25, _tmp$26, _tmp$27, _tmp$28, _tmp$29, _tmp$30, _tmp$31, _tmp$32, _tmp$33, _tmp$34, _tmp$35, _tmp$36, _tmp$37, _tmp$38, c3, _tmp$39, _tmp$40, _tmp$41, _tmp$42, _tmp$43, _tmp$44, _tmp$45, _tmp$46, _tmp$47, _tmp$48, _tmp$49, _tmp$50;
+		var _tmp, _tmp$1, _tmp$10, _tmp$11, _tmp$12, _tmp$13, _tmp$14, _tmp$15, _tmp$16, _tmp$17, _tmp$18, _tmp$19, _tmp$2, _tmp$20, _tmp$21, _tmp$22, _tmp$23, _tmp$24, _tmp$25, _tmp$26, _tmp$27, _tmp$28, _tmp$29, _tmp$3, _tmp$30, _tmp$31, _tmp$32, _tmp$33, _tmp$34, _tmp$35, _tmp$36, _tmp$37, _tmp$38, _tmp$39, _tmp$4, _tmp$40, _tmp$41, _tmp$42, _tmp$43, _tmp$44, _tmp$45, _tmp$46, _tmp$47, _tmp$48, _tmp$49, _tmp$5, _tmp$50, _tmp$6, _tmp$7, _tmp$8, _tmp$9, c0, c1, c2, c3, n, r = 0, short$1 = false, size = 0;
 		n = s.length;
 		if (n < 1) {
 			_tmp = 65533; _tmp$1 = 0; _tmp$2 = true; r = _tmp; size = _tmp$1; short$1 = _tmp$2;
@@ -3134,7 +3256,7 @@ $packages["unicode/utf8"] = (function() {
 		return [r, size, short$1];
 	};
 	DecodeRuneInString = $pkg.DecodeRuneInString = function(s) {
-		var r = 0, size = 0, _tuple;
+		var _tuple, r = 0, size = 0;
 		_tuple = decodeRuneInStringInternal(s); r = _tuple[0]; size = _tuple[1];
 		return [r, size];
 	};
@@ -3168,25 +3290,34 @@ $packages["unicode/utf8"] = (function() {
 		}
 	};
 	$pkg.$init = function() {
+		$pkg.$init = function() {};
+		/* */ var $r, $s = 0; var $init_utf8 = function() { while (true) { switch ($s) { case 0:
+		/* */ } return; } }; $init_utf8.$blocking = true; return $init_utf8;
 	};
 	return $pkg;
 })();
 $packages["strconv"] = (function() {
-	var $pkg = {}, math = $packages["math"], errors = $packages["errors"], utf8 = $packages["unicode/utf8"], shifts, FormatInt, Itoa, formatBits, unhex, UnquoteChar, Unquote, contains;
+	var $pkg = {}, errors, math, utf8, sliceType$6, arrayType$4, arrayType$5, shifts, FormatInt, Itoa, formatBits, unhex, UnquoteChar, Unquote, contains;
+	errors = $packages["errors"];
+	math = $packages["math"];
+	utf8 = $packages["unicode/utf8"];
+	sliceType$6 = $sliceType($Uint8);
+	arrayType$4 = $arrayType($Uint8, 65);
+	arrayType$5 = $arrayType($Uint8, 4);
 	FormatInt = $pkg.FormatInt = function(i, base) {
 		var _tuple, s;
-		_tuple = formatBits(($sliceType($Uint8)).nil, new $Uint64(i.$high, i.$low), base, (i.$high < 0 || (i.$high === 0 && i.$low < 0)), false); s = _tuple[1];
+		_tuple = formatBits(sliceType$6.nil, new $Uint64(i.$high, i.$low), base, (i.$high < 0 || (i.$high === 0 && i.$low < 0)), false); s = _tuple[1];
 		return s;
 	};
 	Itoa = $pkg.Itoa = function(i) {
 		return FormatInt(new $Int64(0, i), 10);
 	};
 	formatBits = function(dst, u, base, neg, append_) {
-		var d = ($sliceType($Uint8)).nil, s = "", a, i, q, x, j, x$1, x$2, q$1, x$3, s$1, b, m, b$1;
+		var a, b, b$1, d = sliceType$6.nil, i, j, m, q, q$1, s = "", s$1, x, x$1, x$2, x$3;
 		if (base < 2 || base > 36) {
 			$panic(new $String("strconv: illegal AppendInt/FormatInt base"));
 		}
-		a = ($arrayType($Uint8, 65)).zero(); $copy(a, ($arrayType($Uint8, 65)).zero(), ($arrayType($Uint8, 65)));
+		a = $clone(arrayType$4.zero(), arrayType$4);
 		i = 65;
 		if (neg) {
 			u = new $Uint64(-u.$high, -u.$low);
@@ -3232,14 +3363,14 @@ $packages["strconv"] = (function() {
 			(i < 0 || i >= a.length) ? $throwRuntimeError("index out of range") : a[i] = 45;
 		}
 		if (append_) {
-			d = $appendSlice(dst, $subslice(new ($sliceType($Uint8))(a), i));
+			d = $appendSlice(dst, $subslice(new sliceType$6(a), i));
 			return [d, s];
 		}
-		s = $bytesToString($subslice(new ($sliceType($Uint8))(a), i));
+		s = $bytesToString($subslice(new sliceType$6(a), i));
 		return [d, s];
 	};
 	unhex = function(b) {
-		var v = 0, ok = false, c, _tmp, _tmp$1, _tmp$2, _tmp$3, _tmp$4, _tmp$5;
+		var _tmp, _tmp$1, _tmp$2, _tmp$3, _tmp$4, _tmp$5, c, ok = false, v = 0;
 		c = (b >> 0);
 		if (48 <= c && c <= 57) {
 			_tmp = c - 48 >> 0; _tmp$1 = true; v = _tmp; ok = _tmp$1;
@@ -3254,7 +3385,7 @@ $packages["strconv"] = (function() {
 		return [v, ok];
 	};
 	UnquoteChar = $pkg.UnquoteChar = function(s, quote) {
-		var value = 0, multibyte = false, tail = "", err = $ifaceNil, c, _tuple, r, size, _tmp, _tmp$1, _tmp$2, _tmp$3, _tmp$4, _tmp$5, _tmp$6, _tmp$7, c$1, _ref, n, _ref$1, v, j, _tuple$1, x, ok, v$1, j$1, x$1;
+		var _ref, _ref$1, _tmp, _tmp$1, _tmp$2, _tmp$3, _tmp$4, _tmp$5, _tmp$6, _tmp$7, _tuple, _tuple$1, c, c$1, err = $ifaceNil, j, j$1, multibyte = false, n, ok, r, size, tail = "", v, v$1, value = 0, x, x$1;
 		c = s.charCodeAt(0);
 		if ((c === quote) && ((quote === 39) || (quote === 34))) {
 			err = $pkg.ErrSyntax;
@@ -3362,7 +3493,7 @@ $packages["strconv"] = (function() {
 		return [value, multibyte, tail, err];
 	};
 	Unquote = $pkg.Unquote = function(s) {
-		var t = "", err = $ifaceNil, n, _tmp, _tmp$1, quote, _tmp$2, _tmp$3, _tmp$4, _tmp$5, _tmp$6, _tmp$7, _tmp$8, _tmp$9, _tmp$10, _tmp$11, _ref, _tmp$12, _tmp$13, _tuple, r, size, _tmp$14, _tmp$15, runeTmp, _q, x, buf, _tuple$1, c, multibyte, ss, err$1, _tmp$16, _tmp$17, n$1, _tmp$18, _tmp$19, _tmp$20, _tmp$21;
+		var _q, _ref, _tmp, _tmp$1, _tmp$10, _tmp$11, _tmp$12, _tmp$13, _tmp$14, _tmp$15, _tmp$16, _tmp$17, _tmp$18, _tmp$19, _tmp$2, _tmp$20, _tmp$21, _tmp$3, _tmp$4, _tmp$5, _tmp$6, _tmp$7, _tmp$8, _tmp$9, _tuple, _tuple$1, buf, c, err = $ifaceNil, err$1, multibyte, n, n$1, quote, r, runeTmp, size, ss, t = "";
 		n = s.length;
 		if (n < 2) {
 			_tmp = ""; _tmp$1 = $pkg.ErrSyntax; t = _tmp; err = _tmp$1;
@@ -3403,8 +3534,8 @@ $packages["strconv"] = (function() {
 				}
 			}
 		}
-		runeTmp = ($arrayType($Uint8, 4)).zero(); $copy(runeTmp, ($arrayType($Uint8, 4)).zero(), ($arrayType($Uint8, 4)));
-		buf = ($sliceType($Uint8)).make(0, (_q = (x = s.length, (((3 >>> 16 << 16) * x >> 0) + (3 << 16 >>> 16) * x) >> 0) / 2, (_q === _q && _q !== 1/0 && _q !== -1/0) ? _q >> 0 : $throwRuntimeError("integer divide by zero")));
+		runeTmp = $clone(arrayType$5.zero(), arrayType$5);
+		buf = $makeSlice(sliceType$6, 0, (_q = (3 * s.length >> 0) / 2, (_q === _q && _q !== 1/0 && _q !== -1/0) ? _q >> 0 : $throwRuntimeError("integer divide by zero")));
 		while (s.length > 0) {
 			_tuple$1 = UnquoteChar(s, quote); c = _tuple$1[0]; multibyte = _tuple$1[1]; ss = _tuple$1[2]; err$1 = _tuple$1[3];
 			if (!($interfaceIsEqual(err$1, $ifaceNil))) {
@@ -3415,8 +3546,8 @@ $packages["strconv"] = (function() {
 			if (c < 128 || !multibyte) {
 				buf = $append(buf, (c << 24 >>> 24));
 			} else {
-				n$1 = utf8.EncodeRune(new ($sliceType($Uint8))(runeTmp), c);
-				buf = $appendSlice(buf, $subslice(new ($sliceType($Uint8))(runeTmp), 0, n$1));
+				n$1 = utf8.EncodeRune(new sliceType$6(runeTmp), c);
+				buf = $appendSlice(buf, $subslice(new sliceType$6(runeTmp), 0, n$1));
 			}
 			if ((quote === 39) && !((s.length === 0))) {
 				_tmp$18 = ""; _tmp$19 = $pkg.ErrSyntax; t = _tmp$18; err = _tmp$19;
@@ -3438,14 +3569,21 @@ $packages["strconv"] = (function() {
 		return false;
 	};
 	$pkg.$init = function() {
+		$pkg.$init = function() {};
+		/* */ var $r, $s = 0; var $init_strconv = function() { while (true) { switch ($s) { case 0:
+		$r = errors.$init($BLOCKING); /* */ $s = 1; case 1: if ($r && $r.$blocking) { $r = $r(); }
+		$r = math.$init($BLOCKING); /* */ $s = 2; case 2: if ($r && $r.$blocking) { $r = $r(); }
+		$r = utf8.$init($BLOCKING); /* */ $s = 3; case 3: if ($r && $r.$blocking) { $r = $r(); }
 		$pkg.ErrRange = errors.New("value out of range");
 		$pkg.ErrSyntax = errors.New("invalid syntax");
-		shifts = $toNativeArray("Uint", [0, 0, 1, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0]);
+		shifts = $toNativeArray($kindUint, [0, 0, 1, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0]);
+		/* */ } return; } }; $init_strconv.$blocking = true; return $init_strconv;
 	};
 	return $pkg;
 })();
 $packages["sync/atomic"] = (function() {
-	var $pkg = {}, CompareAndSwapInt32, AddInt32;
+	var $pkg = {}, js, CompareAndSwapInt32, AddInt32;
+	js = $packages["github.com/gopherjs/gopherjs/js"];
 	CompareAndSwapInt32 = $pkg.CompareAndSwapInt32 = function(addr, old, new$1) {
 		if (addr.$get() === old) {
 			addr.$set(new$1);
@@ -3460,32 +3598,52 @@ $packages["sync/atomic"] = (function() {
 		return new$1;
 	};
 	$pkg.$init = function() {
+		$pkg.$init = function() {};
+		/* */ var $r, $s = 0; var $init_atomic = function() { while (true) { switch ($s) { case 0:
+		$r = js.$init($BLOCKING); /* */ $s = 1; case 1: if ($r && $r.$blocking) { $r = $r(); }
+		/* */ } return; } }; $init_atomic.$blocking = true; return $init_atomic;
 	};
 	return $pkg;
 })();
 $packages["sync"] = (function() {
-	var $pkg = {}, atomic = $packages["sync/atomic"], runtime = $packages["runtime"], Pool, Mutex, poolLocal, syncSema, allPools, runtime_registerPoolCleanup, runtime_Syncsemcheck, poolCleanup, init, indexLocal, runtime_Semacquire, runtime_Semrelease, init$1;
-	Pool = $pkg.Pool = $newType(0, "Struct", "sync.Pool", "Pool", "sync", function(local_, localSize_, store_, New_) {
+	var $pkg = {}, runtime, atomic, Pool, Mutex, poolLocal, syncSema, ptrType, sliceType, ptrType$2, ptrType$3, ptrType$5, sliceType$2, funcType, ptrType$10, arrayType, allPools, runtime_registerPoolCleanup, runtime_Syncsemcheck, poolCleanup, init, indexLocal, runtime_Semacquire, runtime_Semrelease, init$1;
+	runtime = $packages["runtime"];
+	atomic = $packages["sync/atomic"];
+	Pool = $pkg.Pool = $newType(0, $kindStruct, "sync.Pool", "Pool", "sync", function(local_, localSize_, store_, New_) {
 		this.$val = this;
 		this.local = local_ !== undefined ? local_ : 0;
 		this.localSize = localSize_ !== undefined ? localSize_ : 0;
-		this.store = store_ !== undefined ? store_ : ($sliceType($emptyInterface)).nil;
+		this.store = store_ !== undefined ? store_ : sliceType$2.nil;
 		this.New = New_ !== undefined ? New_ : $throwNilPointerError;
 	});
-	Mutex = $pkg.Mutex = $newType(0, "Struct", "sync.Mutex", "Mutex", "sync", function(state_, sema_) {
+	Mutex = $pkg.Mutex = $newType(0, $kindStruct, "sync.Mutex", "Mutex", "sync", function(state_, sema_) {
 		this.$val = this;
 		this.state = state_ !== undefined ? state_ : 0;
 		this.sema = sema_ !== undefined ? sema_ : 0;
 	});
-	poolLocal = $pkg.poolLocal = $newType(0, "Struct", "sync.poolLocal", "poolLocal", "sync", function(private$0_, shared_, Mutex_, pad_) {
+	poolLocal = $pkg.poolLocal = $newType(0, $kindStruct, "sync.poolLocal", "poolLocal", "sync", function(private$0_, shared_, Mutex_, pad_) {
 		this.$val = this;
 		this.private$0 = private$0_ !== undefined ? private$0_ : $ifaceNil;
-		this.shared = shared_ !== undefined ? shared_ : ($sliceType($emptyInterface)).nil;
-		this.Mutex = Mutex_ !== undefined ? Mutex_ : new Mutex.Ptr();
-		this.pad = pad_ !== undefined ? pad_ : ($arrayType($Uint8, 128)).zero();
+		this.shared = shared_ !== undefined ? shared_ : sliceType$2.nil;
+		this.Mutex = Mutex_ !== undefined ? Mutex_ : new Mutex.ptr();
+		this.pad = pad_ !== undefined ? pad_ : arrayType.zero();
 	});
-	syncSema = $pkg.syncSema = $newType(12, "Array", "sync.syncSema", "syncSema", "sync", null);
-	Pool.Ptr.prototype.Get = function() {
+	syncSema = $pkg.syncSema = $newType(0, $kindStruct, "sync.syncSema", "syncSema", "sync", function(lock_, head_, tail_) {
+		this.$val = this;
+		this.lock = lock_ !== undefined ? lock_ : 0;
+		this.head = head_ !== undefined ? head_ : 0;
+		this.tail = tail_ !== undefined ? tail_ : 0;
+	});
+	ptrType = $ptrType(Pool);
+	sliceType = $sliceType(ptrType);
+	ptrType$2 = $ptrType($Uint32);
+	ptrType$3 = $ptrType($Int32);
+	ptrType$5 = $ptrType(poolLocal);
+	sliceType$2 = $sliceType($emptyInterface);
+	funcType = $funcType([], [$emptyInterface], false);
+	ptrType$10 = $ptrType(Mutex);
+	arrayType = $arrayType($Uint8, 128);
+	Pool.ptr.prototype.Get = function() {
 		var p, x, x$1, x$2;
 		p = this;
 		if (p.store.$length === 0) {
@@ -3499,7 +3657,7 @@ $packages["sync"] = (function() {
 		return x$2;
 	};
 	Pool.prototype.Get = function() { return this.$val.Get(); };
-	Pool.Ptr.prototype.Put = function(x) {
+	Pool.ptr.prototype.Put = function(x) {
 		var p;
 		p = this;
 		if ($interfaceIsEqual(x, $ifaceNil)) {
@@ -3512,10 +3670,10 @@ $packages["sync"] = (function() {
 	};
 	runtime_Syncsemcheck = function(size) {
 	};
-	Mutex.Ptr.prototype.Lock = function() {
-		var m, awoke, old, new$1;
+	Mutex.ptr.prototype.Lock = function() {
+		var awoke, m, new$1, old;
 		m = this;
-		if (atomic.CompareAndSwapInt32(new ($ptrType($Int32))(function() { return this.$target.state; }, function($v) { this.$target.state = $v; }, m), 0, 1)) {
+		if (atomic.CompareAndSwapInt32(new ptrType$3(function() { return this.$target.state; }, function($v) { this.$target.state = $v; }, m), 0, 1)) {
 			return;
 		}
 		awoke = false;
@@ -3528,20 +3686,20 @@ $packages["sync"] = (function() {
 			if (awoke) {
 				new$1 = new$1 & ~(2);
 			}
-			if (atomic.CompareAndSwapInt32(new ($ptrType($Int32))(function() { return this.$target.state; }, function($v) { this.$target.state = $v; }, m), old, new$1)) {
+			if (atomic.CompareAndSwapInt32(new ptrType$3(function() { return this.$target.state; }, function($v) { this.$target.state = $v; }, m), old, new$1)) {
 				if ((old & 1) === 0) {
 					break;
 				}
-				runtime_Semacquire(new ($ptrType($Uint32))(function() { return this.$target.sema; }, function($v) { this.$target.sema = $v; }, m));
+				runtime_Semacquire(new ptrType$2(function() { return this.$target.sema; }, function($v) { this.$target.sema = $v; }, m));
 				awoke = true;
 			}
 		}
 	};
 	Mutex.prototype.Lock = function() { return this.$val.Lock(); };
-	Mutex.Ptr.prototype.Unlock = function() {
+	Mutex.ptr.prototype.Unlock = function() {
 		var m, new$1, old;
 		m = this;
-		new$1 = atomic.AddInt32(new ($ptrType($Int32))(function() { return this.$target.state; }, function($v) { this.$target.state = $v; }, m), -1);
+		new$1 = atomic.AddInt32(new ptrType$3(function() { return this.$target.state; }, function($v) { this.$target.state = $v; }, m), -1);
 		if ((((new$1 + 1 >> 0)) & 1) === 0) {
 			$panic(new $String("sync: unlock of unlocked mutex"));
 		}
@@ -3551,8 +3709,8 @@ $packages["sync"] = (function() {
 				return;
 			}
 			new$1 = ((old - 4 >> 0)) | 2;
-			if (atomic.CompareAndSwapInt32(new ($ptrType($Int32))(function() { return this.$target.state; }, function($v) { this.$target.state = $v; }, m), old, new$1)) {
-				runtime_Semrelease(new ($ptrType($Uint32))(function() { return this.$target.sema; }, function($v) { this.$target.sema = $v; }, m));
+			if (atomic.CompareAndSwapInt32(new ptrType$3(function() { return this.$target.state; }, function($v) { this.$target.state = $v; }, m), old, new$1)) {
+				runtime_Semrelease(new ptrType$2(function() { return this.$target.sema; }, function($v) { this.$target.sema = $v; }, m));
 				return;
 			}
 			old = m.state;
@@ -3560,13 +3718,13 @@ $packages["sync"] = (function() {
 	};
 	Mutex.prototype.Unlock = function() { return this.$val.Unlock(); };
 	poolCleanup = function() {
-		var _ref, _i, i, p, i$1, l, _ref$1, _i$1, j, x;
+		var _i, _i$1, _ref, _ref$1, i, i$1, j, l, p, x;
 		_ref = allPools;
 		_i = 0;
 		while (_i < _ref.$length) {
 			i = _i;
 			p = ((_i < 0 || _i >= _ref.$length) ? $throwRuntimeError("index out of range") : _ref.$array[_ref.$offset + _i]);
-			(i < 0 || i >= allPools.$length) ? $throwRuntimeError("index out of range") : allPools.$array[allPools.$offset + i] = ($ptrType(Pool)).nil;
+			(i < 0 || i >= allPools.$length) ? $throwRuntimeError("index out of range") : allPools.$array[allPools.$offset + i] = ptrType.nil;
 			i$1 = 0;
 			while (i$1 < (p.localSize >> 0)) {
 				l = indexLocal(p.local, i$1);
@@ -3578,12 +3736,14 @@ $packages["sync"] = (function() {
 					(x = l.shared, (j < 0 || j >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + j] = $ifaceNil);
 					_i$1++;
 				}
-				l.shared = ($sliceType($emptyInterface)).nil;
+				l.shared = sliceType$2.nil;
 				i$1 = i$1 + (1) >> 0;
 			}
+			p.local = 0;
+			p.localSize = 0;
 			_i++;
 		}
-		allPools = new ($sliceType(($ptrType(Pool))))([]);
+		allPools = new sliceType([]);
 	};
 	init = function() {
 		runtime_registerPoolCleanup(poolCleanup);
@@ -3600,35 +3760,45 @@ $packages["sync"] = (function() {
 	};
 	init$1 = function() {
 		var s;
-		s = syncSema.zero(); $copy(s, syncSema.zero(), syncSema);
+		s = $clone(new syncSema.ptr(), syncSema);
 		runtime_Syncsemcheck(12);
 	};
+	ptrType.methods = [{prop: "Get", name: "Get", pkg: "", type: $funcType([], [$emptyInterface], false)}, {prop: "Put", name: "Put", pkg: "", type: $funcType([$emptyInterface], [], false)}, {prop: "getSlow", name: "getSlow", pkg: "sync", type: $funcType([], [$emptyInterface], false)}, {prop: "pin", name: "pin", pkg: "sync", type: $funcType([], [ptrType$5], false)}, {prop: "pinSlow", name: "pinSlow", pkg: "sync", type: $funcType([], [ptrType$5], false)}];
+	ptrType$10.methods = [{prop: "Lock", name: "Lock", pkg: "", type: $funcType([], [], false)}, {prop: "Unlock", name: "Unlock", pkg: "", type: $funcType([], [], false)}];
+	ptrType$5.methods = [{prop: "Lock", name: "Lock", pkg: "", type: $funcType([], [], false)}, {prop: "Unlock", name: "Unlock", pkg: "", type: $funcType([], [], false)}];
+	Pool.init([{prop: "local", name: "local", pkg: "sync", type: $UnsafePointer, tag: ""}, {prop: "localSize", name: "localSize", pkg: "sync", type: $Uintptr, tag: ""}, {prop: "store", name: "store", pkg: "sync", type: sliceType$2, tag: ""}, {prop: "New", name: "New", pkg: "", type: funcType, tag: ""}]);
+	Mutex.init([{prop: "state", name: "state", pkg: "sync", type: $Int32, tag: ""}, {prop: "sema", name: "sema", pkg: "sync", type: $Uint32, tag: ""}]);
+	poolLocal.init([{prop: "private$0", name: "private", pkg: "sync", type: $emptyInterface, tag: ""}, {prop: "shared", name: "shared", pkg: "sync", type: sliceType$2, tag: ""}, {prop: "Mutex", name: "", pkg: "", type: Mutex, tag: ""}, {prop: "pad", name: "pad", pkg: "sync", type: arrayType, tag: ""}]);
+	syncSema.init([{prop: "lock", name: "lock", pkg: "sync", type: $Uintptr, tag: ""}, {prop: "head", name: "head", pkg: "sync", type: $UnsafePointer, tag: ""}, {prop: "tail", name: "tail", pkg: "sync", type: $UnsafePointer, tag: ""}]);
 	$pkg.$init = function() {
-		($ptrType(Pool)).methods = [["Get", "Get", "", $funcType([], [$emptyInterface], false), -1], ["Put", "Put", "", $funcType([$emptyInterface], [], false), -1], ["getSlow", "getSlow", "sync", $funcType([], [$emptyInterface], false), -1], ["pin", "pin", "sync", $funcType([], [($ptrType(poolLocal))], false), -1], ["pinSlow", "pinSlow", "sync", $funcType([], [($ptrType(poolLocal))], false), -1]];
-		Pool.init([["local", "local", "sync", $UnsafePointer, ""], ["localSize", "localSize", "sync", $Uintptr, ""], ["store", "store", "sync", ($sliceType($emptyInterface)), ""], ["New", "New", "", ($funcType([], [$emptyInterface], false)), ""]]);
-		($ptrType(Mutex)).methods = [["Lock", "Lock", "", $funcType([], [], false), -1], ["Unlock", "Unlock", "", $funcType([], [], false), -1]];
-		Mutex.init([["state", "state", "sync", $Int32, ""], ["sema", "sema", "sync", $Uint32, ""]]);
-		($ptrType(poolLocal)).methods = [["Lock", "Lock", "", $funcType([], [], false), 2], ["Unlock", "Unlock", "", $funcType([], [], false), 2]];
-		poolLocal.init([["private$0", "private", "sync", $emptyInterface, ""], ["shared", "shared", "sync", ($sliceType($emptyInterface)), ""], ["Mutex", "", "", Mutex, ""], ["pad", "pad", "sync", ($arrayType($Uint8, 128)), ""]]);
-		syncSema.init($Uintptr, 3);
-		allPools = ($sliceType(($ptrType(Pool)))).nil;
+		$pkg.$init = function() {};
+		/* */ var $r, $s = 0; var $init_sync = function() { while (true) { switch ($s) { case 0:
+		$r = runtime.$init($BLOCKING); /* */ $s = 1; case 1: if ($r && $r.$blocking) { $r = $r(); }
+		$r = atomic.$init($BLOCKING); /* */ $s = 2; case 2: if ($r && $r.$blocking) { $r = $r(); }
+		allPools = sliceType.nil;
 		init();
 		init$1();
+		/* */ } return; } }; $init_sync.$blocking = true; return $init_sync;
 	};
 	return $pkg;
 })();
 $packages["reflect"] = (function() {
-	var $pkg = {}, js = $packages["github.com/gopherjs/gopherjs/js"], runtime = $packages["runtime"], strconv = $packages["strconv"], sync = $packages["sync"], math = $packages["math"], mapIter, Type, Kind, rtype, method, uncommonType, ChanDir, arrayType, chanType, funcType, imethod, interfaceType, mapType, ptrType, sliceType, structField, structType, Method, StructField, StructTag, fieldScan, Value, flag, ValueError, iword, nonEmptyInterface, initialized, kindNames, uint8Type, init, jsType, reflectType, isWrapped, copyStruct, makeValue, MakeSlice, jsObject, TypeOf, ValueOf, SliceOf, Zero, unsafe_New, makeInt, memmove, loadScalar, mapaccess, mapassign, mapdelete, mapiterinit, mapiterkey, mapiternext, maplen, cvtDirect, methodReceiver, valueInterface, ifaceE2I, methodName, makeMethodValue, PtrTo, implements$1, directlyAssignable, haveIdenticalUnderlyingType, toType, overflowFloat32, New, convertOp, makeFloat, makeComplex, makeString, makeBytes, makeRunes, cvtInt, cvtUint, cvtFloatInt, cvtFloatUint, cvtIntFloat, cvtUintFloat, cvtFloat, cvtComplex, cvtIntString, cvtUintString, cvtBytesString, cvtStringBytes, cvtRunesString, cvtStringRunes, cvtT2I, cvtI2I, call;
-	mapIter = $pkg.mapIter = $newType(0, "Struct", "reflect.mapIter", "mapIter", "reflect", function(t_, m_, keys_, i_) {
+	var $pkg = {}, js, math, runtime, strconv, sync, mapIter, Type, Kind, rtype, typeAlg, method, uncommonType, ChanDir, arrayType, chanType, funcType, imethod, interfaceType, mapType, ptrType, sliceType, structField, structType, Method, StructField, StructTag, fieldScan, Value, flag, ValueError, nonEmptyInterface, ptrType$1, ptrType$2, sliceType$1, ptrType$3, arrayType$1, ptrType$4, ptrType$5, sliceType$2, sliceType$3, sliceType$4, sliceType$5, structType$5, sliceType$6, ptrType$6, arrayType$2, structType$6, ptrType$7, sliceType$7, ptrType$8, ptrType$9, ptrType$10, ptrType$11, sliceType$9, sliceType$10, ptrType$12, ptrType$17, sliceType$12, sliceType$13, ptrType$18, funcType$2, ptrType$19, funcType$3, funcType$4, ptrType$20, ptrType$21, ptrType$22, ptrType$23, ptrType$24, ptrType$25, arrayType$3, ptrType$27, ptrType$28, ptrType$29, initialized, stringPtrMap, jsObject, jsContainer, kindNames, uint8Type, init, jsType, reflectType, newStringPtr, isWrapped, copyStruct, makeValue, MakeSlice, TypeOf, ValueOf, SliceOf, Zero, unsafe_New, makeInt, memmove, mapaccess, mapassign, mapdelete, mapiterinit, mapiterkey, mapiternext, maplen, cvtDirect, methodReceiver, valueInterface, ifaceE2I, methodName, makeMethodValue, wrapJsObject, unwrapJsObject, PtrTo, implements$1, directlyAssignable, haveIdenticalUnderlyingType, toType, ifaceIndir, overflowFloat32, New, convertOp, makeFloat, makeComplex, makeString, makeBytes, makeRunes, cvtInt, cvtUint, cvtFloatInt, cvtFloatUint, cvtIntFloat, cvtUintFloat, cvtFloat, cvtComplex, cvtIntString, cvtUintString, cvtBytesString, cvtStringBytes, cvtRunesString, cvtStringRunes, cvtT2I, cvtI2I;
+	js = $packages["github.com/gopherjs/gopherjs/js"];
+	math = $packages["math"];
+	runtime = $packages["runtime"];
+	strconv = $packages["strconv"];
+	sync = $packages["sync"];
+	mapIter = $pkg.mapIter = $newType(0, $kindStruct, "reflect.mapIter", "mapIter", "reflect", function(t_, m_, keys_, i_) {
 		this.$val = this;
 		this.t = t_ !== undefined ? t_ : $ifaceNil;
-		this.m = m_ !== undefined ? m_ : $ifaceNil;
-		this.keys = keys_ !== undefined ? keys_ : $ifaceNil;
+		this.m = m_ !== undefined ? m_ : null;
+		this.keys = keys_ !== undefined ? keys_ : null;
 		this.i = i_ !== undefined ? i_ : 0;
 	});
-	Type = $pkg.Type = $newType(8, "Interface", "reflect.Type", "Type", "reflect", null);
-	Kind = $pkg.Kind = $newType(4, "Uint", "reflect.Kind", "Kind", "reflect", null);
-	rtype = $pkg.rtype = $newType(0, "Struct", "reflect.rtype", "rtype", "reflect", function(size_, hash_, _$2_, align_, fieldAlign_, kind_, alg_, gc_, string_, uncommonType_, ptrToThis_, zero_) {
+	Type = $pkg.Type = $newType(8, $kindInterface, "reflect.Type", "Type", "reflect", null);
+	Kind = $pkg.Kind = $newType(4, $kindUint, "reflect.Kind", "Kind", "reflect", null);
+	rtype = $pkg.rtype = $newType(0, $kindStruct, "reflect.rtype", "rtype", "reflect", function(size_, hash_, _$2_, align_, fieldAlign_, kind_, alg_, gc_, string_, uncommonType_, ptrToThis_, zero_) {
 		this.$val = this;
 		this.size = size_ !== undefined ? size_ : 0;
 		this.hash = hash_ !== undefined ? hash_ : 0;
@@ -3636,165 +3806,313 @@ $packages["reflect"] = (function() {
 		this.align = align_ !== undefined ? align_ : 0;
 		this.fieldAlign = fieldAlign_ !== undefined ? fieldAlign_ : 0;
 		this.kind = kind_ !== undefined ? kind_ : 0;
-		this.alg = alg_ !== undefined ? alg_ : ($ptrType($Uintptr)).nil;
-		this.gc = gc_ !== undefined ? gc_ : 0;
-		this.string = string_ !== undefined ? string_ : ($ptrType($String)).nil;
-		this.uncommonType = uncommonType_ !== undefined ? uncommonType_ : ($ptrType(uncommonType)).nil;
-		this.ptrToThis = ptrToThis_ !== undefined ? ptrToThis_ : ($ptrType(rtype)).nil;
+		this.alg = alg_ !== undefined ? alg_ : ptrType$3.nil;
+		this.gc = gc_ !== undefined ? gc_ : arrayType$1.zero();
+		this.string = string_ !== undefined ? string_ : ptrType$4.nil;
+		this.uncommonType = uncommonType_ !== undefined ? uncommonType_ : ptrType$5.nil;
+		this.ptrToThis = ptrToThis_ !== undefined ? ptrToThis_ : ptrType$1.nil;
 		this.zero = zero_ !== undefined ? zero_ : 0;
 	});
-	method = $pkg.method = $newType(0, "Struct", "reflect.method", "method", "reflect", function(name_, pkgPath_, mtyp_, typ_, ifn_, tfn_) {
+	typeAlg = $pkg.typeAlg = $newType(0, $kindStruct, "reflect.typeAlg", "typeAlg", "reflect", function(hash_, equal_) {
 		this.$val = this;
-		this.name = name_ !== undefined ? name_ : ($ptrType($String)).nil;
-		this.pkgPath = pkgPath_ !== undefined ? pkgPath_ : ($ptrType($String)).nil;
-		this.mtyp = mtyp_ !== undefined ? mtyp_ : ($ptrType(rtype)).nil;
-		this.typ = typ_ !== undefined ? typ_ : ($ptrType(rtype)).nil;
+		this.hash = hash_ !== undefined ? hash_ : $throwNilPointerError;
+		this.equal = equal_ !== undefined ? equal_ : $throwNilPointerError;
+	});
+	method = $pkg.method = $newType(0, $kindStruct, "reflect.method", "method", "reflect", function(name_, pkgPath_, mtyp_, typ_, ifn_, tfn_) {
+		this.$val = this;
+		this.name = name_ !== undefined ? name_ : ptrType$4.nil;
+		this.pkgPath = pkgPath_ !== undefined ? pkgPath_ : ptrType$4.nil;
+		this.mtyp = mtyp_ !== undefined ? mtyp_ : ptrType$1.nil;
+		this.typ = typ_ !== undefined ? typ_ : ptrType$1.nil;
 		this.ifn = ifn_ !== undefined ? ifn_ : 0;
 		this.tfn = tfn_ !== undefined ? tfn_ : 0;
 	});
-	uncommonType = $pkg.uncommonType = $newType(0, "Struct", "reflect.uncommonType", "uncommonType", "reflect", function(name_, pkgPath_, methods_) {
+	uncommonType = $pkg.uncommonType = $newType(0, $kindStruct, "reflect.uncommonType", "uncommonType", "reflect", function(name_, pkgPath_, methods_) {
 		this.$val = this;
-		this.name = name_ !== undefined ? name_ : ($ptrType($String)).nil;
-		this.pkgPath = pkgPath_ !== undefined ? pkgPath_ : ($ptrType($String)).nil;
-		this.methods = methods_ !== undefined ? methods_ : ($sliceType(method)).nil;
+		this.name = name_ !== undefined ? name_ : ptrType$4.nil;
+		this.pkgPath = pkgPath_ !== undefined ? pkgPath_ : ptrType$4.nil;
+		this.methods = methods_ !== undefined ? methods_ : sliceType$2.nil;
 	});
-	ChanDir = $pkg.ChanDir = $newType(4, "Int", "reflect.ChanDir", "ChanDir", "reflect", null);
-	arrayType = $pkg.arrayType = $newType(0, "Struct", "reflect.arrayType", "arrayType", "reflect", function(rtype_, elem_, slice_, len_) {
+	ChanDir = $pkg.ChanDir = $newType(4, $kindInt, "reflect.ChanDir", "ChanDir", "reflect", null);
+	arrayType = $pkg.arrayType = $newType(0, $kindStruct, "reflect.arrayType", "arrayType", "reflect", function(rtype_, elem_, slice_, len_) {
 		this.$val = this;
-		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.Ptr();
-		this.elem = elem_ !== undefined ? elem_ : ($ptrType(rtype)).nil;
-		this.slice = slice_ !== undefined ? slice_ : ($ptrType(rtype)).nil;
+		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.ptr();
+		this.elem = elem_ !== undefined ? elem_ : ptrType$1.nil;
+		this.slice = slice_ !== undefined ? slice_ : ptrType$1.nil;
 		this.len = len_ !== undefined ? len_ : 0;
 	});
-	chanType = $pkg.chanType = $newType(0, "Struct", "reflect.chanType", "chanType", "reflect", function(rtype_, elem_, dir_) {
+	chanType = $pkg.chanType = $newType(0, $kindStruct, "reflect.chanType", "chanType", "reflect", function(rtype_, elem_, dir_) {
 		this.$val = this;
-		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.Ptr();
-		this.elem = elem_ !== undefined ? elem_ : ($ptrType(rtype)).nil;
+		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.ptr();
+		this.elem = elem_ !== undefined ? elem_ : ptrType$1.nil;
 		this.dir = dir_ !== undefined ? dir_ : 0;
 	});
-	funcType = $pkg.funcType = $newType(0, "Struct", "reflect.funcType", "funcType", "reflect", function(rtype_, dotdotdot_, in$2_, out_) {
+	funcType = $pkg.funcType = $newType(0, $kindStruct, "reflect.funcType", "funcType", "reflect", function(rtype_, dotdotdot_, in$2_, out_) {
 		this.$val = this;
-		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.Ptr();
+		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.ptr();
 		this.dotdotdot = dotdotdot_ !== undefined ? dotdotdot_ : false;
-		this.in$2 = in$2_ !== undefined ? in$2_ : ($sliceType(($ptrType(rtype)))).nil;
-		this.out = out_ !== undefined ? out_ : ($sliceType(($ptrType(rtype)))).nil;
+		this.in$2 = in$2_ !== undefined ? in$2_ : sliceType$3.nil;
+		this.out = out_ !== undefined ? out_ : sliceType$3.nil;
 	});
-	imethod = $pkg.imethod = $newType(0, "Struct", "reflect.imethod", "imethod", "reflect", function(name_, pkgPath_, typ_) {
+	imethod = $pkg.imethod = $newType(0, $kindStruct, "reflect.imethod", "imethod", "reflect", function(name_, pkgPath_, typ_) {
 		this.$val = this;
-		this.name = name_ !== undefined ? name_ : ($ptrType($String)).nil;
-		this.pkgPath = pkgPath_ !== undefined ? pkgPath_ : ($ptrType($String)).nil;
-		this.typ = typ_ !== undefined ? typ_ : ($ptrType(rtype)).nil;
+		this.name = name_ !== undefined ? name_ : ptrType$4.nil;
+		this.pkgPath = pkgPath_ !== undefined ? pkgPath_ : ptrType$4.nil;
+		this.typ = typ_ !== undefined ? typ_ : ptrType$1.nil;
 	});
-	interfaceType = $pkg.interfaceType = $newType(0, "Struct", "reflect.interfaceType", "interfaceType", "reflect", function(rtype_, methods_) {
+	interfaceType = $pkg.interfaceType = $newType(0, $kindStruct, "reflect.interfaceType", "interfaceType", "reflect", function(rtype_, methods_) {
 		this.$val = this;
-		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.Ptr();
-		this.methods = methods_ !== undefined ? methods_ : ($sliceType(imethod)).nil;
+		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.ptr();
+		this.methods = methods_ !== undefined ? methods_ : sliceType$4.nil;
 	});
-	mapType = $pkg.mapType = $newType(0, "Struct", "reflect.mapType", "mapType", "reflect", function(rtype_, key_, elem_, bucket_, hmap_) {
+	mapType = $pkg.mapType = $newType(0, $kindStruct, "reflect.mapType", "mapType", "reflect", function(rtype_, key_, elem_, bucket_, hmap_, keysize_, indirectkey_, valuesize_, indirectvalue_, bucketsize_) {
 		this.$val = this;
-		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.Ptr();
-		this.key = key_ !== undefined ? key_ : ($ptrType(rtype)).nil;
-		this.elem = elem_ !== undefined ? elem_ : ($ptrType(rtype)).nil;
-		this.bucket = bucket_ !== undefined ? bucket_ : ($ptrType(rtype)).nil;
-		this.hmap = hmap_ !== undefined ? hmap_ : ($ptrType(rtype)).nil;
+		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.ptr();
+		this.key = key_ !== undefined ? key_ : ptrType$1.nil;
+		this.elem = elem_ !== undefined ? elem_ : ptrType$1.nil;
+		this.bucket = bucket_ !== undefined ? bucket_ : ptrType$1.nil;
+		this.hmap = hmap_ !== undefined ? hmap_ : ptrType$1.nil;
+		this.keysize = keysize_ !== undefined ? keysize_ : 0;
+		this.indirectkey = indirectkey_ !== undefined ? indirectkey_ : 0;
+		this.valuesize = valuesize_ !== undefined ? valuesize_ : 0;
+		this.indirectvalue = indirectvalue_ !== undefined ? indirectvalue_ : 0;
+		this.bucketsize = bucketsize_ !== undefined ? bucketsize_ : 0;
 	});
-	ptrType = $pkg.ptrType = $newType(0, "Struct", "reflect.ptrType", "ptrType", "reflect", function(rtype_, elem_) {
+	ptrType = $pkg.ptrType = $newType(0, $kindStruct, "reflect.ptrType", "ptrType", "reflect", function(rtype_, elem_) {
 		this.$val = this;
-		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.Ptr();
-		this.elem = elem_ !== undefined ? elem_ : ($ptrType(rtype)).nil;
+		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.ptr();
+		this.elem = elem_ !== undefined ? elem_ : ptrType$1.nil;
 	});
-	sliceType = $pkg.sliceType = $newType(0, "Struct", "reflect.sliceType", "sliceType", "reflect", function(rtype_, elem_) {
+	sliceType = $pkg.sliceType = $newType(0, $kindStruct, "reflect.sliceType", "sliceType", "reflect", function(rtype_, elem_) {
 		this.$val = this;
-		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.Ptr();
-		this.elem = elem_ !== undefined ? elem_ : ($ptrType(rtype)).nil;
+		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.ptr();
+		this.elem = elem_ !== undefined ? elem_ : ptrType$1.nil;
 	});
-	structField = $pkg.structField = $newType(0, "Struct", "reflect.structField", "structField", "reflect", function(name_, pkgPath_, typ_, tag_, offset_) {
+	structField = $pkg.structField = $newType(0, $kindStruct, "reflect.structField", "structField", "reflect", function(name_, pkgPath_, typ_, tag_, offset_) {
 		this.$val = this;
-		this.name = name_ !== undefined ? name_ : ($ptrType($String)).nil;
-		this.pkgPath = pkgPath_ !== undefined ? pkgPath_ : ($ptrType($String)).nil;
-		this.typ = typ_ !== undefined ? typ_ : ($ptrType(rtype)).nil;
-		this.tag = tag_ !== undefined ? tag_ : ($ptrType($String)).nil;
+		this.name = name_ !== undefined ? name_ : ptrType$4.nil;
+		this.pkgPath = pkgPath_ !== undefined ? pkgPath_ : ptrType$4.nil;
+		this.typ = typ_ !== undefined ? typ_ : ptrType$1.nil;
+		this.tag = tag_ !== undefined ? tag_ : ptrType$4.nil;
 		this.offset = offset_ !== undefined ? offset_ : 0;
 	});
-	structType = $pkg.structType = $newType(0, "Struct", "reflect.structType", "structType", "reflect", function(rtype_, fields_) {
+	structType = $pkg.structType = $newType(0, $kindStruct, "reflect.structType", "structType", "reflect", function(rtype_, fields_) {
 		this.$val = this;
-		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.Ptr();
-		this.fields = fields_ !== undefined ? fields_ : ($sliceType(structField)).nil;
+		this.rtype = rtype_ !== undefined ? rtype_ : new rtype.ptr();
+		this.fields = fields_ !== undefined ? fields_ : sliceType$5.nil;
 	});
-	Method = $pkg.Method = $newType(0, "Struct", "reflect.Method", "Method", "reflect", function(Name_, PkgPath_, Type_, Func_, Index_) {
+	Method = $pkg.Method = $newType(0, $kindStruct, "reflect.Method", "Method", "reflect", function(Name_, PkgPath_, Type_, Func_, Index_) {
 		this.$val = this;
 		this.Name = Name_ !== undefined ? Name_ : "";
 		this.PkgPath = PkgPath_ !== undefined ? PkgPath_ : "";
 		this.Type = Type_ !== undefined ? Type_ : $ifaceNil;
-		this.Func = Func_ !== undefined ? Func_ : new Value.Ptr();
+		this.Func = Func_ !== undefined ? Func_ : new Value.ptr();
 		this.Index = Index_ !== undefined ? Index_ : 0;
 	});
-	StructField = $pkg.StructField = $newType(0, "Struct", "reflect.StructField", "StructField", "reflect", function(Name_, PkgPath_, Type_, Tag_, Offset_, Index_, Anonymous_) {
+	StructField = $pkg.StructField = $newType(0, $kindStruct, "reflect.StructField", "StructField", "reflect", function(Name_, PkgPath_, Type_, Tag_, Offset_, Index_, Anonymous_) {
 		this.$val = this;
 		this.Name = Name_ !== undefined ? Name_ : "";
 		this.PkgPath = PkgPath_ !== undefined ? PkgPath_ : "";
 		this.Type = Type_ !== undefined ? Type_ : $ifaceNil;
 		this.Tag = Tag_ !== undefined ? Tag_ : "";
 		this.Offset = Offset_ !== undefined ? Offset_ : 0;
-		this.Index = Index_ !== undefined ? Index_ : ($sliceType($Int)).nil;
+		this.Index = Index_ !== undefined ? Index_ : sliceType$9.nil;
 		this.Anonymous = Anonymous_ !== undefined ? Anonymous_ : false;
 	});
-	StructTag = $pkg.StructTag = $newType(8, "String", "reflect.StructTag", "StructTag", "reflect", null);
-	fieldScan = $pkg.fieldScan = $newType(0, "Struct", "reflect.fieldScan", "fieldScan", "reflect", function(typ_, index_) {
+	StructTag = $pkg.StructTag = $newType(8, $kindString, "reflect.StructTag", "StructTag", "reflect", null);
+	fieldScan = $pkg.fieldScan = $newType(0, $kindStruct, "reflect.fieldScan", "fieldScan", "reflect", function(typ_, index_) {
 		this.$val = this;
-		this.typ = typ_ !== undefined ? typ_ : ($ptrType(structType)).nil;
-		this.index = index_ !== undefined ? index_ : ($sliceType($Int)).nil;
+		this.typ = typ_ !== undefined ? typ_ : ptrType$12.nil;
+		this.index = index_ !== undefined ? index_ : sliceType$9.nil;
 	});
-	Value = $pkg.Value = $newType(0, "Struct", "reflect.Value", "Value", "reflect", function(typ_, ptr_, scalar_, flag_) {
+	Value = $pkg.Value = $newType(0, $kindStruct, "reflect.Value", "Value", "reflect", function(typ_, ptr_, flag_) {
 		this.$val = this;
-		this.typ = typ_ !== undefined ? typ_ : ($ptrType(rtype)).nil;
+		this.typ = typ_ !== undefined ? typ_ : ptrType$1.nil;
 		this.ptr = ptr_ !== undefined ? ptr_ : 0;
-		this.scalar = scalar_ !== undefined ? scalar_ : 0;
 		this.flag = flag_ !== undefined ? flag_ : 0;
 	});
-	flag = $pkg.flag = $newType(4, "Uintptr", "reflect.flag", "flag", "reflect", null);
-	ValueError = $pkg.ValueError = $newType(0, "Struct", "reflect.ValueError", "ValueError", "reflect", function(Method_, Kind_) {
+	flag = $pkg.flag = $newType(4, $kindUintptr, "reflect.flag", "flag", "reflect", null);
+	ValueError = $pkg.ValueError = $newType(0, $kindStruct, "reflect.ValueError", "ValueError", "reflect", function(Method_, Kind_) {
 		this.$val = this;
 		this.Method = Method_ !== undefined ? Method_ : "";
 		this.Kind = Kind_ !== undefined ? Kind_ : 0;
 	});
-	iword = $pkg.iword = $newType(4, "UnsafePointer", "reflect.iword", "iword", "reflect", null);
-	nonEmptyInterface = $pkg.nonEmptyInterface = $newType(0, "Struct", "reflect.nonEmptyInterface", "nonEmptyInterface", "reflect", function(itab_, word_) {
+	nonEmptyInterface = $pkg.nonEmptyInterface = $newType(0, $kindStruct, "reflect.nonEmptyInterface", "nonEmptyInterface", "reflect", function(itab_, word_) {
 		this.$val = this;
-		this.itab = itab_ !== undefined ? itab_ : ($ptrType(($structType([["ityp", "ityp", "reflect", ($ptrType(rtype)), ""], ["typ", "typ", "reflect", ($ptrType(rtype)), ""], ["link", "link", "reflect", $UnsafePointer, ""], ["bad", "bad", "reflect", $Int32, ""], ["unused", "unused", "reflect", $Int32, ""], ["fun", "fun", "reflect", ($arrayType($UnsafePointer, 100000)), ""]])))).nil;
+		this.itab = itab_ !== undefined ? itab_ : ptrType$7.nil;
 		this.word = word_ !== undefined ? word_ : 0;
 	});
+	ptrType$1 = $ptrType(rtype);
+	ptrType$2 = $ptrType(ptrType);
+	sliceType$1 = $sliceType($String);
+	ptrType$3 = $ptrType(typeAlg);
+	arrayType$1 = $arrayType($UnsafePointer, 2);
+	ptrType$4 = $ptrType($String);
+	ptrType$5 = $ptrType(uncommonType);
+	sliceType$2 = $sliceType(method);
+	sliceType$3 = $sliceType(ptrType$1);
+	sliceType$4 = $sliceType(imethod);
+	sliceType$5 = $sliceType(structField);
+	structType$5 = $structType([{prop: "str", name: "str", pkg: "reflect", type: $String, tag: ""}]);
+	sliceType$6 = $sliceType(Value);
+	ptrType$6 = $ptrType(nonEmptyInterface);
+	arrayType$2 = $arrayType($UnsafePointer, 100000);
+	structType$6 = $structType([{prop: "ityp", name: "ityp", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "typ", name: "typ", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "link", name: "link", pkg: "reflect", type: $UnsafePointer, tag: ""}, {prop: "bad", name: "bad", pkg: "reflect", type: $Int32, tag: ""}, {prop: "unused", name: "unused", pkg: "reflect", type: $Int32, tag: ""}, {prop: "fun", name: "fun", pkg: "reflect", type: arrayType$2, tag: ""}]);
+	ptrType$7 = $ptrType(structType$6);
+	sliceType$7 = $sliceType(js.Object);
+	ptrType$8 = $ptrType($Uint8);
+	ptrType$9 = $ptrType(method);
+	ptrType$10 = $ptrType(interfaceType);
+	ptrType$11 = $ptrType(imethod);
+	sliceType$9 = $sliceType($Int);
+	sliceType$10 = $sliceType(fieldScan);
+	ptrType$12 = $ptrType(structType);
+	ptrType$17 = $ptrType($UnsafePointer);
+	sliceType$12 = $sliceType($Uint8);
+	sliceType$13 = $sliceType($Int32);
+	ptrType$18 = $ptrType(funcType);
+	funcType$2 = $funcType([$String], [$Bool], false);
+	ptrType$19 = $ptrType(Kind);
+	funcType$3 = $funcType([$UnsafePointer, $Uintptr, $Uintptr], [$Uintptr], false);
+	funcType$4 = $funcType([$UnsafePointer, $UnsafePointer, $Uintptr], [$Bool], false);
+	ptrType$20 = $ptrType(ChanDir);
+	ptrType$21 = $ptrType(arrayType);
+	ptrType$22 = $ptrType(chanType);
+	ptrType$23 = $ptrType(mapType);
+	ptrType$24 = $ptrType(sliceType);
+	ptrType$25 = $ptrType(StructTag);
+	arrayType$3 = $arrayType($Uintptr, 2);
+	ptrType$27 = $ptrType(Value);
+	ptrType$28 = $ptrType(flag);
+	ptrType$29 = $ptrType(ValueError);
 	init = function() {
-		var used, x, x$1, x$2, x$3, x$4, x$5, x$6, x$7, x$8, x$9, x$10, x$11, x$12, pkg, _map, _key;
+		var used, x, x$1, x$10, x$11, x$12, x$2, x$3, x$4, x$5, x$6, x$7, x$8, x$9;
 		used = (function(i) {
 		});
-		used((x = new rtype.Ptr(0, 0, 0, 0, 0, 0, ($ptrType($Uintptr)).nil, 0, ($ptrType($String)).nil, ($ptrType(uncommonType)).nil, ($ptrType(rtype)).nil, 0), new x.constructor.Struct(x)));
-		used((x$1 = new uncommonType.Ptr(($ptrType($String)).nil, ($ptrType($String)).nil, ($sliceType(method)).nil), new x$1.constructor.Struct(x$1)));
-		used((x$2 = new method.Ptr(($ptrType($String)).nil, ($ptrType($String)).nil, ($ptrType(rtype)).nil, ($ptrType(rtype)).nil, 0, 0), new x$2.constructor.Struct(x$2)));
-		used((x$3 = new arrayType.Ptr(new rtype.Ptr(), ($ptrType(rtype)).nil, ($ptrType(rtype)).nil, 0), new x$3.constructor.Struct(x$3)));
-		used((x$4 = new chanType.Ptr(new rtype.Ptr(), ($ptrType(rtype)).nil, 0), new x$4.constructor.Struct(x$4)));
-		used((x$5 = new funcType.Ptr(new rtype.Ptr(), false, ($sliceType(($ptrType(rtype)))).nil, ($sliceType(($ptrType(rtype)))).nil), new x$5.constructor.Struct(x$5)));
-		used((x$6 = new interfaceType.Ptr(new rtype.Ptr(), ($sliceType(imethod)).nil), new x$6.constructor.Struct(x$6)));
-		used((x$7 = new mapType.Ptr(new rtype.Ptr(), ($ptrType(rtype)).nil, ($ptrType(rtype)).nil, ($ptrType(rtype)).nil, ($ptrType(rtype)).nil), new x$7.constructor.Struct(x$7)));
-		used((x$8 = new ptrType.Ptr(new rtype.Ptr(), ($ptrType(rtype)).nil), new x$8.constructor.Struct(x$8)));
-		used((x$9 = new sliceType.Ptr(new rtype.Ptr(), ($ptrType(rtype)).nil), new x$9.constructor.Struct(x$9)));
-		used((x$10 = new structType.Ptr(new rtype.Ptr(), ($sliceType(structField)).nil), new x$10.constructor.Struct(x$10)));
-		used((x$11 = new imethod.Ptr(($ptrType($String)).nil, ($ptrType($String)).nil, ($ptrType(rtype)).nil), new x$11.constructor.Struct(x$11)));
-		used((x$12 = new structField.Ptr(($ptrType($String)).nil, ($ptrType($String)).nil, ($ptrType(rtype)).nil, ($ptrType($String)).nil, 0), new x$12.constructor.Struct(x$12)));
-		pkg = $pkg;
-		pkg.kinds = $externalize((_map = new $Map(), _key = "Bool", _map[_key] = { k: _key, v: 1 }, _key = "Int", _map[_key] = { k: _key, v: 2 }, _key = "Int8", _map[_key] = { k: _key, v: 3 }, _key = "Int16", _map[_key] = { k: _key, v: 4 }, _key = "Int32", _map[_key] = { k: _key, v: 5 }, _key = "Int64", _map[_key] = { k: _key, v: 6 }, _key = "Uint", _map[_key] = { k: _key, v: 7 }, _key = "Uint8", _map[_key] = { k: _key, v: 8 }, _key = "Uint16", _map[_key] = { k: _key, v: 9 }, _key = "Uint32", _map[_key] = { k: _key, v: 10 }, _key = "Uint64", _map[_key] = { k: _key, v: 11 }, _key = "Uintptr", _map[_key] = { k: _key, v: 12 }, _key = "Float32", _map[_key] = { k: _key, v: 13 }, _key = "Float64", _map[_key] = { k: _key, v: 14 }, _key = "Complex64", _map[_key] = { k: _key, v: 15 }, _key = "Complex128", _map[_key] = { k: _key, v: 16 }, _key = "Array", _map[_key] = { k: _key, v: 17 }, _key = "Chan", _map[_key] = { k: _key, v: 18 }, _key = "Func", _map[_key] = { k: _key, v: 19 }, _key = "Interface", _map[_key] = { k: _key, v: 20 }, _key = "Map", _map[_key] = { k: _key, v: 21 }, _key = "Ptr", _map[_key] = { k: _key, v: 22 }, _key = "Slice", _map[_key] = { k: _key, v: 23 }, _key = "String", _map[_key] = { k: _key, v: 24 }, _key = "Struct", _map[_key] = { k: _key, v: 25 }, _key = "UnsafePointer", _map[_key] = { k: _key, v: 26 }, _map), ($mapType($String, Kind)));
-		pkg.RecvDir = 1;
-		pkg.SendDir = 2;
-		pkg.BothDir = 3;
-		$reflect = pkg;
+		used((x = new rtype.ptr(0, 0, 0, 0, 0, 0, ptrType$3.nil, arrayType$1.zero(), ptrType$4.nil, ptrType$5.nil, ptrType$1.nil, 0), new x.constructor.elem(x)));
+		used((x$1 = new uncommonType.ptr(ptrType$4.nil, ptrType$4.nil, sliceType$2.nil), new x$1.constructor.elem(x$1)));
+		used((x$2 = new method.ptr(ptrType$4.nil, ptrType$4.nil, ptrType$1.nil, ptrType$1.nil, 0, 0), new x$2.constructor.elem(x$2)));
+		used((x$3 = new arrayType.ptr(new rtype.ptr(), ptrType$1.nil, ptrType$1.nil, 0), new x$3.constructor.elem(x$3)));
+		used((x$4 = new chanType.ptr(new rtype.ptr(), ptrType$1.nil, 0), new x$4.constructor.elem(x$4)));
+		used((x$5 = new funcType.ptr(new rtype.ptr(), false, sliceType$3.nil, sliceType$3.nil), new x$5.constructor.elem(x$5)));
+		used((x$6 = new interfaceType.ptr(new rtype.ptr(), sliceType$4.nil), new x$6.constructor.elem(x$6)));
+		used((x$7 = new mapType.ptr(new rtype.ptr(), ptrType$1.nil, ptrType$1.nil, ptrType$1.nil, ptrType$1.nil, 0, 0, 0, 0, 0), new x$7.constructor.elem(x$7)));
+		used((x$8 = new ptrType.ptr(new rtype.ptr(), ptrType$1.nil), new x$8.constructor.elem(x$8)));
+		used((x$9 = new sliceType.ptr(new rtype.ptr(), ptrType$1.nil), new x$9.constructor.elem(x$9)));
+		used((x$10 = new structType.ptr(new rtype.ptr(), sliceType$5.nil), new x$10.constructor.elem(x$10)));
+		used((x$11 = new imethod.ptr(ptrType$4.nil, ptrType$4.nil, ptrType$1.nil), new x$11.constructor.elem(x$11)));
+		used((x$12 = new structField.ptr(ptrType$4.nil, ptrType$4.nil, ptrType$1.nil, ptrType$4.nil, 0), new x$12.constructor.elem(x$12)));
 		initialized = true;
-		uint8Type = $assertType(TypeOf(new $Uint8(0)), ($ptrType(rtype)));
+		uint8Type = $assertType(TypeOf(new $Uint8(0)), ptrType$1);
 	};
 	jsType = function(typ) {
 		return typ.jsType;
 	};
 	reflectType = function(typ) {
-		return typ.reflectType();
+		var _i, _i$1, _i$2, _i$3, _i$4, _ref, _ref$1, _ref$2, _ref$3, _ref$4, _ref$5, dir, f, fields, i, i$1, i$2, i$3, i$4, imethods, in$1, m, m$1, methods, methods$1, out, params, reflectFields, reflectMethods, results, rt, setKindType, t;
+		if (typ.reflectType === undefined) {
+			rt = new rtype.ptr((($parseInt(typ.size) >> 0) >>> 0), 0, 0, 0, 0, (($parseInt(typ.kind) >> 0) << 24 >>> 24), ptrType$3.nil, arrayType$1.zero(), newStringPtr(typ.string), ptrType$5.nil, ptrType$1.nil, 0);
+			rt.jsType = typ;
+			typ.reflectType = rt;
+			methods = typ.methods;
+			if (!($internalize(typ.typeName, $String) === "") || !(($parseInt(methods.length) === 0))) {
+				reflectMethods = $makeSlice(sliceType$2, $parseInt(methods.length));
+				_ref = reflectMethods;
+				_i = 0;
+				while (_i < _ref.$length) {
+					i = _i;
+					m = methods[i];
+					t = m.type;
+					$copy(((i < 0 || i >= reflectMethods.$length) ? $throwRuntimeError("index out of range") : reflectMethods.$array[reflectMethods.$offset + i]), new method.ptr(newStringPtr(m.name), newStringPtr(m.pkg), reflectType(t), reflectType($funcType(new ($global.Array)(typ).concat(t.params), t.results, t.variadic)), 0, 0), method);
+					_i++;
+				}
+				rt.uncommonType = new uncommonType.ptr(newStringPtr(typ.typeName), newStringPtr(typ.pkg), reflectMethods);
+				rt.uncommonType.jsType = typ;
+			}
+			setKindType = (function(kindType) {
+				kindType.rtype = rt;
+				rt.kindType = kindType;
+			});
+			_ref$1 = rt.Kind();
+			if (_ref$1 === 17) {
+				setKindType(new arrayType.ptr(new rtype.ptr(), reflectType(typ.elem), ptrType$1.nil, (($parseInt(typ.len) >> 0) >>> 0)));
+			} else if (_ref$1 === 18) {
+				dir = 3;
+				if (!!(typ.sendOnly)) {
+					dir = 2;
+				}
+				if (!!(typ.recvOnly)) {
+					dir = 1;
+				}
+				setKindType(new chanType.ptr(new rtype.ptr(), reflectType(typ.elem), (dir >>> 0)));
+			} else if (_ref$1 === 19) {
+				params = typ.params;
+				in$1 = $makeSlice(sliceType$3, $parseInt(params.length));
+				_ref$2 = in$1;
+				_i$1 = 0;
+				while (_i$1 < _ref$2.$length) {
+					i$1 = _i$1;
+					(i$1 < 0 || i$1 >= in$1.$length) ? $throwRuntimeError("index out of range") : in$1.$array[in$1.$offset + i$1] = reflectType(params[i$1]);
+					_i$1++;
+				}
+				results = typ.results;
+				out = $makeSlice(sliceType$3, $parseInt(results.length));
+				_ref$3 = out;
+				_i$2 = 0;
+				while (_i$2 < _ref$3.$length) {
+					i$2 = _i$2;
+					(i$2 < 0 || i$2 >= out.$length) ? $throwRuntimeError("index out of range") : out.$array[out.$offset + i$2] = reflectType(results[i$2]);
+					_i$2++;
+				}
+				setKindType(new funcType.ptr($clone(rt, rtype), !!(typ.variadic), in$1, out));
+			} else if (_ref$1 === 20) {
+				methods$1 = typ.methods;
+				imethods = $makeSlice(sliceType$4, $parseInt(methods$1.length));
+				_ref$4 = imethods;
+				_i$3 = 0;
+				while (_i$3 < _ref$4.$length) {
+					i$3 = _i$3;
+					m$1 = methods$1[i$3];
+					$copy(((i$3 < 0 || i$3 >= imethods.$length) ? $throwRuntimeError("index out of range") : imethods.$array[imethods.$offset + i$3]), new imethod.ptr(newStringPtr(m$1.name), newStringPtr(m$1.pkg), reflectType(m$1.type)), imethod);
+					_i$3++;
+				}
+				setKindType(new interfaceType.ptr($clone(rt, rtype), imethods));
+			} else if (_ref$1 === 21) {
+				setKindType(new mapType.ptr(new rtype.ptr(), reflectType(typ.key), reflectType(typ.elem), ptrType$1.nil, ptrType$1.nil, 0, 0, 0, 0, 0));
+			} else if (_ref$1 === 22) {
+				setKindType(new ptrType.ptr(new rtype.ptr(), reflectType(typ.elem)));
+			} else if (_ref$1 === 23) {
+				setKindType(new sliceType.ptr(new rtype.ptr(), reflectType(typ.elem)));
+			} else if (_ref$1 === 25) {
+				fields = typ.fields;
+				reflectFields = $makeSlice(sliceType$5, $parseInt(fields.length));
+				_ref$5 = reflectFields;
+				_i$4 = 0;
+				while (_i$4 < _ref$5.$length) {
+					i$4 = _i$4;
+					f = fields[i$4];
+					$copy(((i$4 < 0 || i$4 >= reflectFields.$length) ? $throwRuntimeError("index out of range") : reflectFields.$array[reflectFields.$offset + i$4]), new structField.ptr(newStringPtr(f.name), newStringPtr(f.pkg), reflectType(f.type), newStringPtr(f.tag), (i$4 >>> 0)), structField);
+					_i$4++;
+				}
+				setKindType(new structType.ptr($clone(rt, rtype), reflectFields));
+			}
+		}
+		return typ.reflectType;
+	};
+	newStringPtr = function(strObj) {
+		var _entry, _key, _tuple, c, ok, ptr, str;
+		c = $clone(new structType$5.ptr(), structType$5);
+		c.str = strObj;
+		str = c.str;
+		if (str === "") {
+			return ptrType$4.nil;
+		}
+		_tuple = (_entry = stringPtrMap[str], _entry !== undefined ? [_entry.v, true] : [ptrType$4.nil, false]); ptr = _tuple[0]; ok = _tuple[1];
+		if (!ok) {
+			ptr = new ptrType$4(function() { return str; }, function($v) { str = $v; });
+			_key = str; (stringPtrMap || $throwRuntimeError("assignment to entry in nil map"))[_key] = { k: _key, v: ptr };
+		}
+		return ptr;
 	};
 	isWrapped = function(typ) {
 		var _ref;
@@ -3807,25 +4125,22 @@ $packages["reflect"] = (function() {
 		return false;
 	};
 	copyStruct = function(dst, src, typ) {
-		var fields, i, name;
+		var fields, i, prop;
 		fields = jsType(typ).fields;
 		i = 0;
 		while (i < $parseInt(fields.length)) {
-			name = $internalize(fields[i][0], $String);
-			dst[$externalize(name, $String)] = src[$externalize(name, $String)];
+			prop = $internalize(fields[i].prop, $String);
+			dst[$externalize(prop, $String)] = src[$externalize(prop, $String)];
 			i = i + (1) >> 0;
 		}
 	};
 	makeValue = function(t, v, fl) {
 		var rt;
 		rt = t.common();
-		if ((t.Kind() === 17) || (t.Kind() === 25) || rt.pointers()) {
-			return new Value.Ptr(rt, v, 0, (fl | ((t.Kind() >>> 0) << 4 >>> 0)) >>> 0);
+		if ((t.Kind() === 17) || (t.Kind() === 25) || (t.Kind() === 22)) {
+			return new Value.ptr(rt, v, (fl | (t.Kind() >>> 0)) >>> 0);
 		}
-		if (t.Size() > 4 || (t.Kind() === 24)) {
-			return new Value.Ptr(rt, $newDataPointer(v, jsType(rt.ptrTo())), 0, (((fl | ((t.Kind() >>> 0) << 4 >>> 0)) >>> 0) | 2) >>> 0);
-		}
-		return new Value.Ptr(rt, 0, v, (fl | ((t.Kind() >>> 0) << 4 >>> 0)) >>> 0);
+		return new Value.ptr(rt, $newDataPointer(v, jsType(rt.ptrTo())), (((fl | (t.Kind() >>> 0)) >>> 0) | 64) >>> 0);
 	};
 	MakeSlice = $pkg.MakeSlice = function(typ, len, cap) {
 		if (!((typ.Kind() === 23))) {
@@ -3840,39 +4155,26 @@ $packages["reflect"] = (function() {
 		if (len > cap) {
 			$panic(new $String("reflect.MakeSlice: len > cap"));
 		}
-		return makeValue(typ, jsType(typ).make(len, cap, $externalize((function() {
+		return makeValue(typ, $makeSlice(jsType(typ), len, cap, (function() {
 			return jsType(typ.Elem()).zero();
-		}), ($funcType([], [js.Object], false)))), 0);
-	};
-	jsObject = function() {
-		return reflectType($packages[$externalize("github.com/gopherjs/gopherjs/js", $String)].Object);
+		})), 0);
 	};
 	TypeOf = $pkg.TypeOf = function(i) {
-		var c;
 		if (!initialized) {
-			return new rtype.Ptr(0, 0, 0, 0, 0, 0, ($ptrType($Uintptr)).nil, 0, ($ptrType($String)).nil, ($ptrType(uncommonType)).nil, ($ptrType(rtype)).nil, 0);
+			return new rtype.ptr(0, 0, 0, 0, 0, 0, ptrType$3.nil, arrayType$1.zero(), ptrType$4.nil, ptrType$5.nil, ptrType$1.nil, 0);
 		}
 		if ($interfaceIsEqual(i, $ifaceNil)) {
 			return $ifaceNil;
 		}
-		c = i.constructor;
-		if (c.kind === undefined) {
-			return jsObject();
-		}
-		return reflectType(c);
+		return reflectType(i.constructor);
 	};
 	ValueOf = $pkg.ValueOf = function(i) {
-		var c;
 		if ($interfaceIsEqual(i, $ifaceNil)) {
-			return new Value.Ptr(($ptrType(rtype)).nil, 0, 0, 0);
+			return new Value.ptr(ptrType$1.nil, 0, 0);
 		}
-		c = i.constructor;
-		if (c.kind === undefined) {
-			return new Value.Ptr(jsObject(), 0, i, 320);
-		}
-		return makeValue(reflectType(c), i.$val, 0);
+		return makeValue(reflectType(i.constructor), i.$val, 0);
 	};
-	rtype.Ptr.prototype.ptrTo = function() {
+	rtype.ptr.prototype.ptrTo = function() {
 		var t;
 		t = this;
 		return reflectType($ptrType(jsType(t)));
@@ -3888,7 +4190,7 @@ $packages["reflect"] = (function() {
 		var _ref;
 		_ref = typ.Kind();
 		if (_ref === 25) {
-			return new (jsType(typ).Ptr)();
+			return new (jsType(typ).ptr)();
 		} else if (_ref === 17) {
 			return jsType(typ).zero();
 		} else {
@@ -3896,38 +4198,34 @@ $packages["reflect"] = (function() {
 		}
 	};
 	makeInt = function(f, bits, t) {
-		var typ, ptr, s, _ref;
+		var _ref, ptr, typ;
 		typ = t.common();
-		if (typ.size > 4) {
-			ptr = unsafe_New(typ);
-			ptr.$set(bits);
-			return new Value.Ptr(typ, ptr, 0, (((f | 2) >>> 0) | ((typ.Kind() >>> 0) << 4 >>> 0)) >>> 0);
-		}
-		s = 0;
+		ptr = unsafe_New(typ);
 		_ref = typ.Kind();
 		if (_ref === 3) {
-			new ($ptrType($Uintptr))(function() { return s; }, function($v) { s = $v; }).$set((bits.$low << 24 >> 24));
+			ptr.$set((bits.$low << 24 >> 24));
 		} else if (_ref === 4) {
-			new ($ptrType($Uintptr))(function() { return s; }, function($v) { s = $v; }).$set((bits.$low << 16 >> 16));
+			ptr.$set((bits.$low << 16 >> 16));
 		} else if (_ref === 2 || _ref === 5) {
-			new ($ptrType($Uintptr))(function() { return s; }, function($v) { s = $v; }).$set((bits.$low >> 0));
+			ptr.$set((bits.$low >> 0));
+		} else if (_ref === 6) {
+			ptr.$set(new $Int64(bits.$high, bits.$low));
 		} else if (_ref === 8) {
-			new ($ptrType($Uintptr))(function() { return s; }, function($v) { s = $v; }).$set((bits.$low << 24 >>> 24));
+			ptr.$set((bits.$low << 24 >>> 24));
 		} else if (_ref === 9) {
-			new ($ptrType($Uintptr))(function() { return s; }, function($v) { s = $v; }).$set((bits.$low << 16 >>> 16));
+			ptr.$set((bits.$low << 16 >>> 16));
 		} else if (_ref === 7 || _ref === 10 || _ref === 12) {
-			new ($ptrType($Uintptr))(function() { return s; }, function($v) { s = $v; }).$set((bits.$low >>> 0));
+			ptr.$set((bits.$low >>> 0));
+		} else if (_ref === 11) {
+			ptr.$set(bits);
 		}
-		return new Value.Ptr(typ, 0, s, (f | ((typ.Kind() >>> 0) << 4 >>> 0)) >>> 0);
+		return new Value.ptr(typ, ptr, (((f | 64) >>> 0) | (typ.Kind() >>> 0)) >>> 0);
 	};
 	memmove = function(adst, asrc, n) {
 		adst.$set(asrc.$get());
 	};
-	loadScalar = function(p, n) {
-		return p.$get();
-	};
 	mapaccess = function(t, m, key) {
-		var k, entry;
+		var entry, k;
 		k = key.$get();
 		if (!(k.$key === undefined)) {
 			k = k.$key();
@@ -3939,7 +4237,7 @@ $packages["reflect"] = (function() {
 		return $newDataPointer(entry.v, jsType(PtrTo(t.Elem())));
 	};
 	mapassign = function(t, m, key, val) {
-		var kv, k, jsVal, et, newVal, entry;
+		var entry, et, jsVal, k, kv, newVal;
 		kv = key.$get();
 		k = kv;
 		if (!(k.$key === undefined)) {
@@ -3966,7 +4264,7 @@ $packages["reflect"] = (function() {
 		delete m[$externalize($internalize(k, $String), $String)];
 	};
 	mapiterinit = function(t, m) {
-		return new mapIter.Ptr(t, m, $keys(m), 0);
+		return new mapIter.ptr(t, m, $keys(m), 0);
 	};
 	mapiterkey = function(it) {
 		var iter, k;
@@ -3983,12 +4281,13 @@ $packages["reflect"] = (function() {
 		return $parseInt($keys(m).length);
 	};
 	cvtDirect = function(v, typ) {
-		var srcVal, val, k, _ref, slice;
-		srcVal = v.iword();
+		var _ref, k, slice, srcVal, val;
+		v = v;
+		srcVal = v.object();
 		if (srcVal === jsType(v.typ).nil) {
 			return makeValue(typ, jsType(typ).nil, v.flag);
 		}
-		val = $ifaceNil;
+		val = null;
 		k = typ.Kind();
 		_ref = k;
 		switch (0) { default: if (_ref === 18) {
@@ -4011,66 +4310,68 @@ $packages["reflect"] = (function() {
 			}
 			val = new (jsType(typ))(srcVal.$get, srcVal.$set);
 		} else if (_ref === 25) {
-			val = new (jsType(typ).Ptr)();
+			val = new (jsType(typ).ptr)();
 			copyStruct(val, srcVal, typ);
 		} else if (_ref === 17 || _ref === 19 || _ref === 20 || _ref === 21 || _ref === 24) {
 			val = v.ptr;
 		} else {
-			$panic(new ValueError.Ptr("reflect.Convert", k));
+			$panic(new ValueError.ptr("reflect.Convert", k));
 		} }
-		return new Value.Ptr(typ.common(), val, 0, (((v.flag & 3) >>> 0) | ((typ.Kind() >>> 0) << 4 >>> 0)) >>> 0);
+		return new Value.ptr(typ.common(), val, (((v.flag & 96) >>> 0) | (typ.Kind() >>> 0)) >>> 0);
 	};
 	methodReceiver = function(op, v, i) {
-		var rcvrtype = ($ptrType(rtype)).nil, t = ($ptrType(rtype)).nil, fn = 0, name, tt, x, m, iface, ut, x$1, m$1, rcvr;
-		name = "";
+		var fn = 0, iface, m, m$1, prop, rcvr, rcvrtype = ptrType$1.nil, t = ptrType$1.nil, tt, ut, x, x$1;
+		v = v;
+		prop = "";
 		if (v.typ.Kind() === 20) {
-			tt = v.typ.interfaceType;
+			tt = v.typ.kindType;
 			if (i < 0 || i >= tt.methods.$length) {
 				$panic(new $String("reflect: internal error: invalid method index"));
 			}
 			m = (x = tt.methods, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i]));
-			if (!($pointerIsEqual(m.pkgPath, ($ptrType($String)).nil))) {
+			if (!($pointerIsEqual(m.pkgPath, ptrType$4.nil))) {
 				$panic(new $String("reflect: " + op + " of unexported method"));
 			}
-			iface = $clone(v.ptr, nonEmptyInterface);
-			if (iface.itab === ($ptrType(($structType([["ityp", "ityp", "reflect", ($ptrType(rtype)), ""], ["typ", "typ", "reflect", ($ptrType(rtype)), ""], ["link", "link", "reflect", $UnsafePointer, ""], ["bad", "bad", "reflect", $Int32, ""], ["unused", "unused", "reflect", $Int32, ""], ["fun", "fun", "reflect", ($arrayType($UnsafePointer, 100000)), ""]])))).nil) {
+			iface = $pointerOfStructConversion(v.ptr, ptrType$6);
+			if (iface.itab === ptrType$7.nil) {
 				$panic(new $String("reflect: " + op + " of method on nil interface value"));
 			}
 			t = m.typ;
-			name = m.name.$get();
+			prop = m.name.$get();
 		} else {
 			ut = v.typ.uncommonType.uncommon();
-			if (ut === ($ptrType(uncommonType)).nil || i < 0 || i >= ut.methods.$length) {
+			if (ut === ptrType$5.nil || i < 0 || i >= ut.methods.$length) {
 				$panic(new $String("reflect: internal error: invalid method index"));
 			}
 			m$1 = (x$1 = ut.methods, ((i < 0 || i >= x$1.$length) ? $throwRuntimeError("index out of range") : x$1.$array[x$1.$offset + i]));
-			if (!($pointerIsEqual(m$1.pkgPath, ($ptrType($String)).nil))) {
+			if (!($pointerIsEqual(m$1.pkgPath, ptrType$4.nil))) {
 				$panic(new $String("reflect: " + op + " of unexported method"));
 			}
 			t = m$1.mtyp;
-			name = $internalize(jsType(v.typ).methods[i][0], $String);
+			prop = $internalize(jsType(v.typ).methods[i].prop, $String);
 		}
-		rcvr = v.iword();
+		rcvr = v.object();
 		if (isWrapped(v.typ)) {
 			rcvr = new (jsType(v.typ))(rcvr);
 		}
-		fn = rcvr[$externalize(name, $String)];
+		fn = rcvr[$externalize(prop, $String)];
 		return [rcvrtype, t, fn];
 	};
 	valueInterface = function(v, safe) {
+		v = v;
 		if (v.flag === 0) {
-			$panic(new ValueError.Ptr("reflect.Value.Interface", 0));
+			$panic(new ValueError.ptr("reflect.Value.Interface", 0));
 		}
-		if (safe && !((((v.flag & 1) >>> 0) === 0))) {
+		if (safe && !((((v.flag & 32) >>> 0) === 0))) {
 			$panic(new $String("reflect.Value.Interface: cannot return value obtained from unexported field or method"));
 		}
-		if (!((((v.flag & 8) >>> 0) === 0))) {
-			$copy(v, makeMethodValue("Interface", $clone(v, Value)), Value);
+		if (!((((v.flag & 256) >>> 0) === 0))) {
+			v = makeMethodValue("Interface", v);
 		}
 		if (isWrapped(v.typ)) {
-			return new (jsType(v.typ))(v.iword());
+			return new (jsType(v.typ))(v.object());
 		}
-		return v.iword();
+		return v.object();
 	};
 	ifaceE2I = function(t, src, dst) {
 		dst.$set(src);
@@ -4079,22 +4380,23 @@ $packages["reflect"] = (function() {
 		return "?FIXME?";
 	};
 	makeMethodValue = function(op, v) {
-		var _tuple, fn, rcvr, fv;
-		if (((v.flag & 8) >>> 0) === 0) {
+		var _tuple, fn, fv, rcvr;
+		v = v;
+		if (((v.flag & 256) >>> 0) === 0) {
 			$panic(new $String("reflect: internal error: invalid use of makePartialFunc"));
 		}
-		_tuple = methodReceiver(op, $clone(v, Value), (v.flag >> 0) >> 9 >> 0); fn = _tuple[2];
-		rcvr = v.iword();
+		_tuple = methodReceiver(op, v, (v.flag >> 0) >> 9 >> 0); fn = _tuple[2];
+		rcvr = v.object();
 		if (isWrapped(v.typ)) {
 			rcvr = new (jsType(v.typ))(rcvr);
 		}
 		fv = (function() {
-			return fn.apply(rcvr, $externalize(new ($sliceType(js.Object))($global.Array.prototype.slice.call(arguments, [])), ($sliceType(js.Object))));
+			return fn.apply(rcvr, $externalize(new ($sliceType(js.Object))($global.Array.prototype.slice.call(arguments, [])), sliceType$7));
 		});
-		return new Value.Ptr(v.Type().common(), fv, 0, (((v.flag & 1) >>> 0) | 304) >>> 0);
+		return new Value.ptr(v.Type().common(), fv, (((v.flag & 32) >>> 0) | 19) >>> 0);
 	};
-	rtype.Ptr.prototype.pointers = function() {
-		var t, _ref;
+	rtype.ptr.prototype.pointers = function() {
+		var _ref, t;
 		t = this;
 		_ref = t.Kind();
 		if (_ref === 22 || _ref === 21 || _ref === 18 || _ref === 19 || _ref === 25 || _ref === 17) {
@@ -4104,39 +4406,59 @@ $packages["reflect"] = (function() {
 		}
 	};
 	rtype.prototype.pointers = function() { return this.$val.pointers(); };
-	uncommonType.Ptr.prototype.Method = function(i) {
-		var m = new Method.Ptr(), t, x, p, fl, mt, name, fn;
+	rtype.ptr.prototype.Comparable = function() {
+		var _ref, i, t;
 		t = this;
-		if (t === ($ptrType(uncommonType)).nil || i < 0 || i >= t.methods.$length) {
+		_ref = t.Kind();
+		if (_ref === 19 || _ref === 23 || _ref === 21) {
+			return false;
+		} else if (_ref === 17) {
+			return t.Elem().Comparable();
+		} else if (_ref === 25) {
+			i = 0;
+			while (i < t.NumField()) {
+				if (!t.Field(i).Type.Comparable()) {
+					return false;
+				}
+				i = i + (1) >> 0;
+			}
+		}
+		return true;
+	};
+	rtype.prototype.Comparable = function() { return this.$val.Comparable(); };
+	uncommonType.ptr.prototype.Method = function(i) {
+		var fl, fn, m = new Method.ptr(), mt, p, prop, t, x;
+		t = this;
+		if (t === ptrType$5.nil || i < 0 || i >= t.methods.$length) {
 			$panic(new $String("reflect: Method index out of range"));
 		}
 		p = (x = t.methods, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i]));
-		if (!($pointerIsEqual(p.name, ($ptrType($String)).nil))) {
+		if (!($pointerIsEqual(p.name, ptrType$4.nil))) {
 			m.Name = p.name.$get();
 		}
-		fl = 304;
-		if (!($pointerIsEqual(p.pkgPath, ($ptrType($String)).nil))) {
+		fl = 19;
+		if (!($pointerIsEqual(p.pkgPath, ptrType$4.nil))) {
 			m.PkgPath = p.pkgPath.$get();
-			fl = (fl | (1)) >>> 0;
+			fl = (fl | (32)) >>> 0;
 		}
 		mt = p.typ;
 		m.Type = mt;
-		name = $internalize(t.jsType.methods[i][0], $String);
+		prop = $internalize(t.jsType.methods[i].prop, $String);
 		fn = (function(rcvr) {
-			return rcvr[$externalize(name, $String)].apply(rcvr, $externalize($subslice(new ($sliceType(js.Object))($global.Array.prototype.slice.call(arguments, [])), 1), ($sliceType(js.Object))));
+			return rcvr[$externalize(prop, $String)].apply(rcvr, $externalize($subslice(new ($sliceType(js.Object))($global.Array.prototype.slice.call(arguments, [])), 1), sliceType$7));
 		});
-		$copy(m.Func, new Value.Ptr(mt, fn, 0, fl), Value);
+		m.Func = new Value.ptr(mt, fn, fl);
 		m.Index = i;
 		return m;
 	};
 	uncommonType.prototype.Method = function(i) { return this.$val.Method(i); };
-	Value.Ptr.prototype.iword = function() {
-		var v, val, _ref, newVal;
-		v = new Value.Ptr(); $copy(v, this, Value);
+	Value.ptr.prototype.object = function() {
+		var _ref, newVal, v, val;
+		v = this;
 		if ((v.typ.Kind() === 17) || (v.typ.Kind() === 25)) {
 			return v.ptr;
 		}
-		if (!((((v.flag & 2) >>> 0) === 0))) {
+		if (!((((v.flag & 64) >>> 0) === 0))) {
 			val = v.ptr.$get();
 			if (!(val === $ifaceNil) && !(val.constructor === jsType(v.typ))) {
 				_ref = v.typ.Kind();
@@ -4158,26 +4480,23 @@ $packages["reflect"] = (function() {
 			}
 			return val;
 		}
-		if (v.typ.pointers()) {
-			return v.ptr;
-		}
-		return v.scalar;
+		return v.ptr;
 	};
-	Value.prototype.iword = function() { return this.$val.iword(); };
-	Value.Ptr.prototype.call = function(op, in$1) {
-		var v, t, fn, rcvr, _tuple, isSlice, n, _ref, _i, x, i, _tmp, _tmp$1, xt, targ, m, slice, elem, i$1, x$1, x$2, xt$1, origIn, nin, nout, argsArray, _ref$1, _i$1, i$2, arg, results, _ref$2, ret, _ref$3, _i$2, i$3;
-		v = new Value.Ptr(); $copy(v, this, Value);
+	Value.prototype.object = function() { return this.$val.object(); };
+	Value.ptr.prototype.call = function(op, in$1) {
+		var _i, _i$1, _i$2, _ref, _ref$1, _ref$2, _ref$3, _tmp, _tmp$1, _tuple, arg, argsArray, elem, fn, i, i$1, i$2, i$3, isSlice, m, n, nin, nout, origIn, rcvr, results, ret, slice, t, targ, v, x, x$1, x$2, xt, xt$1;
+		v = this;
 		t = v.typ;
 		fn = 0;
-		rcvr = $ifaceNil;
-		if (!((((v.flag & 8) >>> 0) === 0))) {
-			_tuple = methodReceiver(op, $clone(v, Value), (v.flag >> 0) >> 9 >> 0); t = _tuple[1]; fn = _tuple[2];
-			rcvr = v.iword();
+		rcvr = null;
+		if (!((((v.flag & 256) >>> 0) === 0))) {
+			_tuple = methodReceiver(op, v, (v.flag >> 0) >> 9 >> 0); t = _tuple[1]; fn = _tuple[2];
+			rcvr = v.object();
 			if (isWrapped(v.typ)) {
 				rcvr = new (jsType(v.typ))(rcvr);
 			}
 		} else {
-			fn = v.iword();
+			fn = v.object();
 		}
 		if (fn === 0) {
 			$panic(new $String("reflect.Value.Call: call of nil function"));
@@ -4208,7 +4527,7 @@ $packages["reflect"] = (function() {
 		_ref = in$1;
 		_i = 0;
 		while (_i < _ref.$length) {
-			x = new Value.Ptr(); $copy(x, ((_i < 0 || _i >= _ref.$length) ? $throwRuntimeError("index out of range") : _ref.$array[_ref.$offset + _i]), Value);
+			x = ((_i < 0 || _i >= _ref.$length) ? $throwRuntimeError("index out of range") : _ref.$array[_ref.$offset + _i]);
 			if (x.Kind() === 0) {
 				$panic(new $String("reflect: " + op + " using zero Value argument"));
 			}
@@ -4224,22 +4543,22 @@ $packages["reflect"] = (function() {
 		}
 		if (!isSlice && t.IsVariadic()) {
 			m = in$1.$length - n >> 0;
-			slice = new Value.Ptr(); $copy(slice, MakeSlice(t.In(n), m, m), Value);
+			slice = MakeSlice(t.In(n), m, m);
 			elem = t.In(n).Elem();
 			i$1 = 0;
 			while (i$1 < m) {
-				x$2 = new Value.Ptr(); $copy(x$2, (x$1 = n + i$1 >> 0, ((x$1 < 0 || x$1 >= in$1.$length) ? $throwRuntimeError("index out of range") : in$1.$array[in$1.$offset + x$1])), Value);
+				x$2 = (x$1 = n + i$1 >> 0, ((x$1 < 0 || x$1 >= in$1.$length) ? $throwRuntimeError("index out of range") : in$1.$array[in$1.$offset + x$1]));
 				xt$1 = x$2.Type();
 				if (!xt$1.AssignableTo(elem)) {
 					$panic(new $String("reflect: cannot use " + xt$1.String() + " as type " + elem.String() + " in " + op));
 				}
-				slice.Index(i$1).Set($clone(x$2, Value));
+				slice.Index(i$1).Set(x$2);
 				i$1 = i$1 + (1) >> 0;
 			}
 			origIn = in$1;
-			in$1 = ($sliceType(Value)).make((n + 1 >> 0));
+			in$1 = $makeSlice(sliceType$6, (n + 1 >> 0));
 			$copySlice($subslice(in$1, 0, n), origIn);
-			$copy(((n < 0 || n >= in$1.$length) ? $throwRuntimeError("index out of range") : in$1.$array[in$1.$offset + n]), slice, Value);
+			(n < 0 || n >= in$1.$length) ? $throwRuntimeError("index out of range") : in$1.$array[in$1.$offset + n] = slice;
 		}
 		nin = in$1.$length;
 		if (!((nin === t.NumIn()))) {
@@ -4251,231 +4570,250 @@ $packages["reflect"] = (function() {
 		_i$1 = 0;
 		while (_i$1 < _ref$1.$length) {
 			i$2 = _i$1;
-			arg = new Value.Ptr(); $copy(arg, ((_i$1 < 0 || _i$1 >= _ref$1.$length) ? $throwRuntimeError("index out of range") : _ref$1.$array[_ref$1.$offset + _i$1]), Value);
-			argsArray[i$2] = arg.assignTo("reflect.Value.Call", t.In(i$2).common(), ($ptrType($emptyInterface)).nil).iword();
+			arg = ((_i$1 < 0 || _i$1 >= _ref$1.$length) ? $throwRuntimeError("index out of range") : _ref$1.$array[_ref$1.$offset + _i$1]);
+			argsArray[i$2] = unwrapJsObject(t.In(i$2), arg.assignTo("reflect.Value.Call", t.In(i$2).common(), 0).object());
 			_i$1++;
 		}
 		results = fn.apply(rcvr, argsArray);
 		_ref$2 = nout;
 		if (_ref$2 === 0) {
-			return ($sliceType(Value)).nil;
+			return sliceType$6.nil;
 		} else if (_ref$2 === 1) {
-			return new ($sliceType(Value))([$clone(makeValue(t.Out(0), results, 0), Value)]);
+			return new sliceType$6([$clone(makeValue(t.Out(0), wrapJsObject(t.Out(0), results), 0), Value)]);
 		} else {
-			ret = ($sliceType(Value)).make(nout);
+			ret = $makeSlice(sliceType$6, nout);
 			_ref$3 = ret;
 			_i$2 = 0;
 			while (_i$2 < _ref$3.$length) {
 				i$3 = _i$2;
-				$copy(((i$3 < 0 || i$3 >= ret.$length) ? $throwRuntimeError("index out of range") : ret.$array[ret.$offset + i$3]), makeValue(t.Out(i$3), results[i$3], 0), Value);
+				(i$3 < 0 || i$3 >= ret.$length) ? $throwRuntimeError("index out of range") : ret.$array[ret.$offset + i$3] = makeValue(t.Out(i$3), wrapJsObject(t.Out(i$3), results[i$3]), 0);
 				_i$2++;
 			}
 			return ret;
 		}
 	};
 	Value.prototype.call = function(op, in$1) { return this.$val.call(op, in$1); };
-	Value.Ptr.prototype.Cap = function() {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.Cap = function() {
+		var _ref, k, v;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 17) {
 			return v.typ.Len();
 		} else if (_ref === 18 || _ref === 23) {
-			return $parseInt(v.iword().$capacity) >> 0;
+			return $parseInt(v.object().$capacity) >> 0;
 		}
-		$panic(new ValueError.Ptr("reflect.Value.Cap", k));
+		$panic(new ValueError.ptr("reflect.Value.Cap", k));
 	};
 	Value.prototype.Cap = function() { return this.$val.Cap(); };
-	Value.Ptr.prototype.Elem = function() {
-		var v, k, _ref, val, typ, val$1, tt, fl;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	wrapJsObject = function(typ, val) {
+		if ($interfaceIsEqual(typ, reflectType(jsObject))) {
+			return new (jsContainer)(val);
+		}
+		return val;
+	};
+	unwrapJsObject = function(typ, val) {
+		if ($interfaceIsEqual(typ, reflectType(jsObject))) {
+			return val.Object;
+		}
+		return val;
+	};
+	Value.ptr.prototype.Elem = function() {
+		var _ref, fl, k, tt, typ, v, val, val$1;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 20) {
-			val = v.iword();
+			val = v.object();
 			if (val === $ifaceNil) {
-				return new Value.Ptr(($ptrType(rtype)).nil, 0, 0, 0);
+				return new Value.ptr(ptrType$1.nil, 0, 0);
 			}
 			typ = reflectType(val.constructor);
-			return makeValue(typ, val.$val, (v.flag & 1) >>> 0);
+			return makeValue(typ, val.$val, (v.flag & 32) >>> 0);
 		} else if (_ref === 22) {
 			if (v.IsNil()) {
-				return new Value.Ptr(($ptrType(rtype)).nil, 0, 0, 0);
+				return new Value.ptr(ptrType$1.nil, 0, 0);
 			}
-			val$1 = v.iword();
-			tt = v.typ.ptrType;
-			fl = (((((v.flag & 1) >>> 0) | 2) >>> 0) | 4) >>> 0;
-			fl = (fl | (((tt.elem.Kind() >>> 0) << 4 >>> 0))) >>> 0;
-			return new Value.Ptr(tt.elem, val$1, 0, fl);
+			val$1 = v.object();
+			tt = v.typ.kindType;
+			fl = (((((v.flag & 32) >>> 0) | 64) >>> 0) | 128) >>> 0;
+			fl = (fl | ((tt.elem.Kind() >>> 0))) >>> 0;
+			return new Value.ptr(tt.elem, wrapJsObject(tt.elem, val$1), fl);
 		} else {
-			$panic(new ValueError.Ptr("reflect.Value.Elem", k));
+			$panic(new ValueError.ptr("reflect.Value.Elem", k));
 		}
 	};
 	Value.prototype.Elem = function() { return this.$val.Elem(); };
-	Value.Ptr.prototype.Field = function(i) {
-		var v, tt, x, field, name, typ, fl, s;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(25);
-		tt = v.typ.structType;
+	Value.ptr.prototype.Field = function(i) {
+		var field, fl, prop, s, tt, typ, v, x;
+		v = this;
+		new flag(v.flag).mustBe(25);
+		tt = v.typ.kindType;
 		if (i < 0 || i >= tt.fields.$length) {
 			$panic(new $String("reflect: Field index out of range"));
 		}
 		field = (x = tt.fields, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i]));
-		name = $internalize(jsType(v.typ).fields[i][0], $String);
+		prop = $internalize(jsType(v.typ).fields[i].prop, $String);
 		typ = field.typ;
-		fl = (v.flag & 7) >>> 0;
-		if (!($pointerIsEqual(field.pkgPath, ($ptrType($String)).nil))) {
-			fl = (fl | (1)) >>> 0;
+		fl = (v.flag & 224) >>> 0;
+		if (!($pointerIsEqual(field.pkgPath, ptrType$4.nil))) {
+			fl = (fl | (32)) >>> 0;
 		}
-		fl = (fl | (((typ.Kind() >>> 0) << 4 >>> 0))) >>> 0;
+		fl = (fl | ((typ.Kind() >>> 0))) >>> 0;
 		s = v.ptr;
-		if (!((((fl & 2) >>> 0) === 0)) && !((typ.Kind() === 17)) && !((typ.Kind() === 25))) {
-			return new Value.Ptr(typ, new (jsType(PtrTo(typ)))($externalize((function() {
-				return s[$externalize(name, $String)];
-			}), ($funcType([], [js.Object], false))), $externalize((function(v$1) {
-				s[$externalize(name, $String)] = v$1;
-			}), ($funcType([js.Object], [], false)))), 0, fl);
+		if (!((((fl & 64) >>> 0) === 0)) && !((typ.Kind() === 17)) && !((typ.Kind() === 25))) {
+			return new Value.ptr(typ, new (jsType(PtrTo(typ)))((function() {
+				return wrapJsObject(typ, s[$externalize(prop, $String)]);
+			}), (function(v$1) {
+				s[$externalize(prop, $String)] = unwrapJsObject(typ, v$1);
+			})), fl);
 		}
-		return makeValue(typ, s[$externalize(name, $String)], fl);
+		return makeValue(typ, wrapJsObject(typ, s[$externalize(prop, $String)]), fl);
 	};
 	Value.prototype.Field = function(i) { return this.$val.Field(i); };
-	Value.Ptr.prototype.Index = function(i) {
-		var v, k, _ref, tt, typ, fl, a, s, tt$1, typ$1, fl$1, a$1, str, fl$2;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.Index = function(i) {
+		var _ref, a, a$1, c, fl, fl$1, fl$2, k, s, str, tt, tt$1, typ, typ$1, v;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 17) {
-			tt = v.typ.arrayType;
+			tt = v.typ.kindType;
 			if (i < 0 || i > (tt.len >> 0)) {
 				$panic(new $String("reflect: array index out of range"));
 			}
 			typ = tt.elem;
-			fl = (v.flag & 7) >>> 0;
-			fl = (fl | (((typ.Kind() >>> 0) << 4 >>> 0))) >>> 0;
+			fl = (v.flag & 224) >>> 0;
+			fl = (fl | ((typ.Kind() >>> 0))) >>> 0;
 			a = v.ptr;
-			if (!((((fl & 2) >>> 0) === 0)) && !((typ.Kind() === 17)) && !((typ.Kind() === 25))) {
-				return new Value.Ptr(typ, new (jsType(PtrTo(typ)))($externalize((function() {
-					return a[i];
-				}), ($funcType([], [js.Object], false))), $externalize((function(v$1) {
-					a[i] = v$1;
-				}), ($funcType([js.Object], [], false)))), 0, fl);
+			if (!((((fl & 64) >>> 0) === 0)) && !((typ.Kind() === 17)) && !((typ.Kind() === 25))) {
+				return new Value.ptr(typ, new (jsType(PtrTo(typ)))((function() {
+					return wrapJsObject(typ, a[i]);
+				}), (function(v$1) {
+					a[i] = unwrapJsObject(typ, v$1);
+				})), fl);
 			}
-			return makeValue(typ, a[i], fl);
+			return makeValue(typ, wrapJsObject(typ, a[i]), fl);
 		} else if (_ref === 23) {
-			s = v.iword();
+			s = v.object();
 			if (i < 0 || i >= ($parseInt(s.$length) >> 0)) {
 				$panic(new $String("reflect: slice index out of range"));
 			}
-			tt$1 = v.typ.sliceType;
+			tt$1 = v.typ.kindType;
 			typ$1 = tt$1.elem;
-			fl$1 = (6 | ((v.flag & 1) >>> 0)) >>> 0;
-			fl$1 = (fl$1 | (((typ$1.Kind() >>> 0) << 4 >>> 0))) >>> 0;
+			fl$1 = (192 | ((v.flag & 32) >>> 0)) >>> 0;
+			fl$1 = (fl$1 | ((typ$1.Kind() >>> 0))) >>> 0;
 			i = i + (($parseInt(s.$offset) >> 0)) >> 0;
 			a$1 = s.$array;
-			if (!((((fl$1 & 2) >>> 0) === 0)) && !((typ$1.Kind() === 17)) && !((typ$1.Kind() === 25))) {
-				return new Value.Ptr(typ$1, new (jsType(PtrTo(typ$1)))($externalize((function() {
-					return a$1[i];
-				}), ($funcType([], [js.Object], false))), $externalize((function(v$1) {
-					a$1[i] = v$1;
-				}), ($funcType([js.Object], [], false)))), 0, fl$1);
+			if (!((((fl$1 & 64) >>> 0) === 0)) && !((typ$1.Kind() === 17)) && !((typ$1.Kind() === 25))) {
+				return new Value.ptr(typ$1, new (jsType(PtrTo(typ$1)))((function() {
+					return wrapJsObject(typ$1, a$1[i]);
+				}), (function(v$1) {
+					a$1[i] = unwrapJsObject(typ$1, v$1);
+				})), fl$1);
 			}
-			return makeValue(typ$1, a$1[i], fl$1);
+			return makeValue(typ$1, wrapJsObject(typ$1, a$1[i]), fl$1);
 		} else if (_ref === 24) {
 			str = v.ptr.$get();
 			if (i < 0 || i >= str.length) {
 				$panic(new $String("reflect: string index out of range"));
 			}
-			fl$2 = (((v.flag & 1) >>> 0) | 128) >>> 0;
-			return new Value.Ptr(uint8Type, 0, (str.charCodeAt(i) >>> 0), fl$2);
+			fl$2 = (((v.flag & 32) >>> 0) | 8) >>> 0;
+			c = str.charCodeAt(i);
+			return new Value.ptr(uint8Type, new ptrType$8(function() { return c; }, function($v) { c = $v; }), (fl$2 | 64) >>> 0);
 		} else {
-			$panic(new ValueError.Ptr("reflect.Value.Index", k));
+			$panic(new ValueError.ptr("reflect.Value.Index", k));
 		}
 	};
 	Value.prototype.Index = function(i) { return this.$val.Index(i); };
-	Value.Ptr.prototype.IsNil = function() {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.IsNil = function() {
+		var _ref, k, v;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 18 || _ref === 22 || _ref === 23) {
-			return v.iword() === jsType(v.typ).nil;
+			return v.object() === jsType(v.typ).nil;
 		} else if (_ref === 19) {
-			return v.iword() === $throwNilPointerError;
+			return v.object() === $throwNilPointerError;
 		} else if (_ref === 21) {
-			return v.iword() === false;
+			return v.object() === false;
 		} else if (_ref === 20) {
-			return v.iword() === $ifaceNil;
+			return v.object() === $ifaceNil;
 		} else {
-			$panic(new ValueError.Ptr("reflect.Value.IsNil", k));
+			$panic(new ValueError.ptr("reflect.Value.IsNil", k));
 		}
 	};
 	Value.prototype.IsNil = function() { return this.$val.IsNil(); };
-	Value.Ptr.prototype.Len = function() {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.Len = function() {
+		var _ref, k, v;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 17 || _ref === 24) {
-			return $parseInt(v.iword().length);
+			return $parseInt(v.object().length);
 		} else if (_ref === 23) {
-			return $parseInt(v.iword().$length) >> 0;
+			return $parseInt(v.object().$length) >> 0;
 		} else if (_ref === 18) {
-			return $parseInt(v.iword().$buffer.length) >> 0;
+			return $parseInt(v.object().$buffer.length) >> 0;
 		} else if (_ref === 21) {
-			return $parseInt($keys(v.iword()).length);
+			return $parseInt($keys(v.object()).length);
 		} else {
-			$panic(new ValueError.Ptr("reflect.Value.Len", k));
+			$panic(new ValueError.ptr("reflect.Value.Len", k));
 		}
 	};
 	Value.prototype.Len = function() { return this.$val.Len(); };
-	Value.Ptr.prototype.Pointer = function() {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.Pointer = function() {
+		var _ref, k, v;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
-		if (_ref === 18 || _ref === 21 || _ref === 22 || _ref === 23 || _ref === 26) {
+		if (_ref === 18 || _ref === 21 || _ref === 22 || _ref === 26) {
 			if (v.IsNil()) {
 				return 0;
 			}
-			return v.iword();
+			return v.object();
 		} else if (_ref === 19) {
 			if (v.IsNil()) {
 				return 0;
 			}
 			return 1;
+		} else if (_ref === 23) {
+			if (v.IsNil()) {
+				return 0;
+			}
+			return v.object().$array;
 		} else {
-			$panic(new ValueError.Ptr("reflect.Value.Pointer", k));
+			$panic(new ValueError.ptr("reflect.Value.Pointer", k));
 		}
 	};
 	Value.prototype.Pointer = function() { return this.$val.Pointer(); };
-	Value.Ptr.prototype.Set = function(x) {
-		var v, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		(new flag(x.flag)).mustBeExported();
-		$copy(x, x.assignTo("reflect.Set", v.typ, ($ptrType($emptyInterface)).nil), Value);
-		if (!((((v.flag & 2) >>> 0) === 0))) {
+	Value.ptr.prototype.Set = function(x) {
+		var _ref, v;
+		v = this;
+		x = x;
+		new flag(v.flag).mustBeAssignable();
+		new flag(x.flag).mustBeExported();
+		x = x.assignTo("reflect.Set", v.typ, 0);
+		if (!((((v.flag & 64) >>> 0) === 0))) {
 			_ref = v.typ.Kind();
 			if (_ref === 17) {
 				$copy(v.ptr, x.ptr, jsType(v.typ));
 			} else if (_ref === 20) {
-				v.ptr.$set(valueInterface($clone(x, Value), false));
+				v.ptr.$set(valueInterface(x, false));
 			} else if (_ref === 25) {
 				copyStruct(v.ptr, x.ptr, v.typ);
 			} else {
-				v.ptr.$set(x.iword());
+				v.ptr.$set(x.object());
 			}
 			return;
 		}
 		v.ptr = x.ptr;
 	};
 	Value.prototype.Set = function(x) { return this.$val.Set(x); };
-	Value.Ptr.prototype.SetCap = function(n) {
-		var v, s, newSlice;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		(new flag(v.flag)).mustBe(23);
+	Value.ptr.prototype.SetCap = function(n) {
+		var newSlice, s, v;
+		v = this;
+		new flag(v.flag).mustBeAssignable();
+		new flag(v.flag).mustBe(23);
 		s = v.ptr.$get();
 		if (n < ($parseInt(s.$length) >> 0) || n > ($parseInt(s.$capacity) >> 0)) {
 			$panic(new $String("reflect: slice capacity out of range in SetCap"));
@@ -4487,11 +4825,11 @@ $packages["reflect"] = (function() {
 		v.ptr.$set(newSlice);
 	};
 	Value.prototype.SetCap = function(n) { return this.$val.SetCap(n); };
-	Value.Ptr.prototype.SetLen = function(n) {
-		var v, s, newSlice;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		(new flag(v.flag)).mustBe(23);
+	Value.ptr.prototype.SetLen = function(n) {
+		var newSlice, s, v;
+		v = this;
+		new flag(v.flag).mustBeAssignable();
+		new flag(v.flag).mustBe(23);
 		s = v.ptr.$get();
 		if (n < 0 || n > ($parseInt(s.$capacity) >> 0)) {
 			$panic(new $String("reflect: slice length out of range in SetLen"));
@@ -4503,25 +4841,25 @@ $packages["reflect"] = (function() {
 		v.ptr.$set(newSlice);
 	};
 	Value.prototype.SetLen = function(n) { return this.$val.SetLen(n); };
-	Value.Ptr.prototype.Slice = function(i, j) {
-		var v, cap, typ, s, kind, _ref, tt, str;
-		v = new Value.Ptr(); $copy(v, this, Value);
+	Value.ptr.prototype.Slice = function(i, j) {
+		var _ref, cap, kind, s, str, tt, typ, v;
+		v = this;
 		cap = 0;
 		typ = $ifaceNil;
-		s = $ifaceNil;
-		kind = (new flag(v.flag)).kind();
+		s = null;
+		kind = new flag(v.flag).kind();
 		_ref = kind;
 		if (_ref === 17) {
-			if (((v.flag & 4) >>> 0) === 0) {
+			if (((v.flag & 128) >>> 0) === 0) {
 				$panic(new $String("reflect.Value.Slice: slice of unaddressable array"));
 			}
-			tt = v.typ.arrayType;
+			tt = v.typ.kindType;
 			cap = (tt.len >> 0);
 			typ = SliceOf(tt.elem);
-			s = new (jsType(typ))(v.iword());
+			s = new (jsType(typ))(v.object());
 		} else if (_ref === 23) {
 			typ = v.typ;
-			s = v.iword();
+			s = v.object();
 			cap = $parseInt(s.$capacity) >> 0;
 		} else if (_ref === 24) {
 			str = v.ptr.$get();
@@ -4530,205 +4868,207 @@ $packages["reflect"] = (function() {
 			}
 			return ValueOf(new $String(str.substring(i, j)));
 		} else {
-			$panic(new ValueError.Ptr("reflect.Value.Slice", kind));
+			$panic(new ValueError.ptr("reflect.Value.Slice", kind));
 		}
 		if (i < 0 || j < i || j > cap) {
 			$panic(new $String("reflect.Value.Slice: slice index out of bounds"));
 		}
-		return makeValue(typ, $subslice(s, i, j), (v.flag & 1) >>> 0);
+		return makeValue(typ, $subslice(s, i, j), (v.flag & 32) >>> 0);
 	};
 	Value.prototype.Slice = function(i, j) { return this.$val.Slice(i, j); };
-	Value.Ptr.prototype.Slice3 = function(i, j, k) {
-		var v, cap, typ, s, kind, _ref, tt;
-		v = new Value.Ptr(); $copy(v, this, Value);
+	Value.ptr.prototype.Slice3 = function(i, j, k) {
+		var _ref, cap, kind, s, tt, typ, v;
+		v = this;
 		cap = 0;
 		typ = $ifaceNil;
-		s = $ifaceNil;
-		kind = (new flag(v.flag)).kind();
+		s = null;
+		kind = new flag(v.flag).kind();
 		_ref = kind;
 		if (_ref === 17) {
-			if (((v.flag & 4) >>> 0) === 0) {
+			if (((v.flag & 128) >>> 0) === 0) {
 				$panic(new $String("reflect.Value.Slice: slice of unaddressable array"));
 			}
-			tt = v.typ.arrayType;
+			tt = v.typ.kindType;
 			cap = (tt.len >> 0);
 			typ = SliceOf(tt.elem);
-			s = new (jsType(typ))(v.iword());
+			s = new (jsType(typ))(v.object());
 		} else if (_ref === 23) {
 			typ = v.typ;
-			s = v.iword();
+			s = v.object();
 			cap = $parseInt(s.$capacity) >> 0;
 		} else {
-			$panic(new ValueError.Ptr("reflect.Value.Slice3", kind));
+			$panic(new ValueError.ptr("reflect.Value.Slice3", kind));
 		}
 		if (i < 0 || j < i || k < j || k > cap) {
 			$panic(new $String("reflect.Value.Slice3: slice index out of bounds"));
 		}
-		return makeValue(typ, $subslice(s, i, j, k), (v.flag & 1) >>> 0);
+		return makeValue(typ, $subslice(s, i, j, k), (v.flag & 32) >>> 0);
 	};
 	Value.prototype.Slice3 = function(i, j, k) { return this.$val.Slice3(i, j, k); };
-	Value.Ptr.prototype.Close = function() {
+	Value.ptr.prototype.Close = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(18);
-		(new flag(v.flag)).mustBeExported();
-		$close(v.iword());
+		v = this;
+		new flag(v.flag).mustBe(18);
+		new flag(v.flag).mustBeExported();
+		$close(v.object());
 	};
 	Value.prototype.Close = function() { return this.$val.Close(); };
-	Value.Ptr.prototype.TrySend = function(x) {
-		var v, tt, c;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(18);
-		(new flag(v.flag)).mustBeExported();
-		tt = v.typ.chanType;
+	Value.ptr.prototype.TrySend = function(x) {
+		var c, tt, v;
+		v = this;
+		x = x;
+		new flag(v.flag).mustBe(18);
+		new flag(v.flag).mustBeExported();
+		tt = v.typ.kindType;
 		if (((tt.dir >> 0) & 2) === 0) {
 			$panic(new $String("reflect: send on recv-only channel"));
 		}
-		(new flag(x.flag)).mustBeExported();
-		c = v.iword();
+		new flag(x.flag).mustBeExported();
+		c = v.object();
 		if (!!!(c.$closed) && ($parseInt(c.$recvQueue.length) === 0) && ($parseInt(c.$buffer.length) === ($parseInt(c.$capacity) >> 0))) {
 			return false;
 		}
-		$copy(x, x.assignTo("reflect.Value.Send", tt.elem, ($ptrType($emptyInterface)).nil), Value);
-		$send(c, x.iword());
+		x = x.assignTo("reflect.Value.Send", tt.elem, 0);
+		$send(c, x.object());
 		return true;
 	};
 	Value.prototype.TrySend = function(x) { return this.$val.TrySend(x); };
-	Value.Ptr.prototype.Send = function(x) {
+	Value.ptr.prototype.Send = function(x) {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		$panic(new runtime.NotSupportedError.Ptr("reflect.Value.Send, use reflect.Value.TrySend is possible"));
+		v = this;
+		x = x;
+		$panic(new runtime.NotSupportedError.ptr("reflect.Value.Send, use reflect.Value.TrySend if possible"));
 	};
 	Value.prototype.Send = function(x) { return this.$val.Send(x); };
-	Value.Ptr.prototype.TryRecv = function() {
-		var x = new Value.Ptr(), ok = false, v, tt, res, _tmp, _tmp$1, _tmp$2, _tmp$3;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(18);
-		(new flag(v.flag)).mustBeExported();
-		tt = v.typ.chanType;
+	Value.ptr.prototype.TryRecv = function() {
+		var _tmp, _tmp$1, _tmp$2, _tmp$3, ok = false, res, tt, v, x = new Value.ptr();
+		v = this;
+		new flag(v.flag).mustBe(18);
+		new flag(v.flag).mustBeExported();
+		tt = v.typ.kindType;
 		if (((tt.dir >> 0) & 1) === 0) {
 			$panic(new $String("reflect: recv on send-only channel"));
 		}
-		res = $recv(v.iword());
+		res = $recv(v.object());
 		if (res.constructor === $global.Function) {
-			_tmp = new Value.Ptr(($ptrType(rtype)).nil, 0, 0, 0); _tmp$1 = false; $copy(x, _tmp, Value); ok = _tmp$1;
+			_tmp = new Value.ptr(ptrType$1.nil, 0, 0); _tmp$1 = false; x = _tmp; ok = _tmp$1;
 			return [x, ok];
 		}
-		_tmp$2 = new Value.Ptr(); $copy(_tmp$2, makeValue(tt.elem, res[0], 0), Value); _tmp$3 = !!(res[1]); $copy(x, _tmp$2, Value); ok = _tmp$3;
+		_tmp$2 = makeValue(tt.elem, res[0], 0); _tmp$3 = !!(res[1]); x = _tmp$2; ok = _tmp$3;
 		return [x, ok];
 	};
 	Value.prototype.TryRecv = function() { return this.$val.TryRecv(); };
-	Value.Ptr.prototype.Recv = function() {
-		var x = new Value.Ptr(), ok = false, v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		$panic(new runtime.NotSupportedError.Ptr("reflect.Value.Recv, use reflect.Value.TryRecv is possible"));
+	Value.ptr.prototype.Recv = function() {
+		var ok = false, v, x = new Value.ptr();
+		v = this;
+		$panic(new runtime.NotSupportedError.ptr("reflect.Value.Recv, use reflect.Value.TryRecv if possible"));
 	};
 	Value.prototype.Recv = function() { return this.$val.Recv(); };
 	Kind.prototype.String = function() {
 		var k;
-		k = this.$val !== undefined ? this.$val : this;
+		k = this.$val;
 		if ((k >> 0) < kindNames.$length) {
 			return ((k < 0 || k >= kindNames.$length) ? $throwRuntimeError("index out of range") : kindNames.$array[kindNames.$offset + k]);
 		}
 		return "kind" + strconv.Itoa((k >> 0));
 	};
 	$ptrType(Kind).prototype.String = function() { return new Kind(this.$get()).String(); };
-	uncommonType.Ptr.prototype.uncommon = function() {
+	uncommonType.ptr.prototype.uncommon = function() {
 		var t;
 		t = this;
 		return t;
 	};
 	uncommonType.prototype.uncommon = function() { return this.$val.uncommon(); };
-	uncommonType.Ptr.prototype.PkgPath = function() {
+	uncommonType.ptr.prototype.PkgPath = function() {
 		var t;
 		t = this;
-		if (t === ($ptrType(uncommonType)).nil || $pointerIsEqual(t.pkgPath, ($ptrType($String)).nil)) {
+		if (t === ptrType$5.nil || $pointerIsEqual(t.pkgPath, ptrType$4.nil)) {
 			return "";
 		}
 		return t.pkgPath.$get();
 	};
 	uncommonType.prototype.PkgPath = function() { return this.$val.PkgPath(); };
-	uncommonType.Ptr.prototype.Name = function() {
+	uncommonType.ptr.prototype.Name = function() {
 		var t;
 		t = this;
-		if (t === ($ptrType(uncommonType)).nil || $pointerIsEqual(t.name, ($ptrType($String)).nil)) {
+		if (t === ptrType$5.nil || $pointerIsEqual(t.name, ptrType$4.nil)) {
 			return "";
 		}
 		return t.name.$get();
 	};
 	uncommonType.prototype.Name = function() { return this.$val.Name(); };
-	rtype.Ptr.prototype.String = function() {
+	rtype.ptr.prototype.String = function() {
 		var t;
 		t = this;
 		return t.string.$get();
 	};
 	rtype.prototype.String = function() { return this.$val.String(); };
-	rtype.Ptr.prototype.Size = function() {
+	rtype.ptr.prototype.Size = function() {
 		var t;
 		t = this;
 		return t.size;
 	};
 	rtype.prototype.Size = function() { return this.$val.Size(); };
-	rtype.Ptr.prototype.Bits = function() {
-		var t, k, x;
+	rtype.ptr.prototype.Bits = function() {
+		var k, t;
 		t = this;
-		if (t === ($ptrType(rtype)).nil) {
+		if (t === ptrType$1.nil) {
 			$panic(new $String("reflect: Bits of nil Type"));
 		}
 		k = t.Kind();
 		if (k < 2 || k > 16) {
 			$panic(new $String("reflect: Bits of non-arithmetic Type " + t.String()));
 		}
-		return (x = (t.size >> 0), (((x >>> 16 << 16) * 8 >> 0) + (x << 16 >>> 16) * 8) >> 0);
+		return (t.size >> 0) * 8 >> 0;
 	};
 	rtype.prototype.Bits = function() { return this.$val.Bits(); };
-	rtype.Ptr.prototype.Align = function() {
+	rtype.ptr.prototype.Align = function() {
 		var t;
 		t = this;
 		return (t.align >> 0);
 	};
 	rtype.prototype.Align = function() { return this.$val.Align(); };
-	rtype.Ptr.prototype.FieldAlign = function() {
+	rtype.ptr.prototype.FieldAlign = function() {
 		var t;
 		t = this;
 		return (t.fieldAlign >> 0);
 	};
 	rtype.prototype.FieldAlign = function() { return this.$val.FieldAlign(); };
-	rtype.Ptr.prototype.Kind = function() {
+	rtype.ptr.prototype.Kind = function() {
 		var t;
 		t = this;
-		return (((t.kind & 127) >>> 0) >>> 0);
+		return (((t.kind & 31) >>> 0) >>> 0);
 	};
 	rtype.prototype.Kind = function() { return this.$val.Kind(); };
-	rtype.Ptr.prototype.common = function() {
+	rtype.ptr.prototype.common = function() {
 		var t;
 		t = this;
 		return t;
 	};
 	rtype.prototype.common = function() { return this.$val.common(); };
-	uncommonType.Ptr.prototype.NumMethod = function() {
+	uncommonType.ptr.prototype.NumMethod = function() {
 		var t;
 		t = this;
-		if (t === ($ptrType(uncommonType)).nil) {
+		if (t === ptrType$5.nil) {
 			return 0;
 		}
 		return t.methods.$length;
 	};
 	uncommonType.prototype.NumMethod = function() { return this.$val.NumMethod(); };
-	uncommonType.Ptr.prototype.MethodByName = function(name) {
-		var m = new Method.Ptr(), ok = false, t, p, _ref, _i, i, x, _tmp, _tmp$1;
+	uncommonType.ptr.prototype.MethodByName = function(name) {
+		var _i, _ref, _tmp, _tmp$1, i, m = new Method.ptr(), ok = false, p, t, x;
 		t = this;
-		if (t === ($ptrType(uncommonType)).nil) {
+		if (t === ptrType$5.nil) {
 			return [m, ok];
 		}
-		p = ($ptrType(method)).nil;
+		p = ptrType$9.nil;
 		_ref = t.methods;
 		_i = 0;
 		while (_i < _ref.$length) {
 			i = _i;
 			p = (x = t.methods, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i]));
-			if (!($pointerIsEqual(p.name, ($ptrType($String)).nil)) && p.name.$get() === name) {
-				_tmp = new Method.Ptr(); $copy(_tmp, t.Method(i), Method); _tmp$1 = true; $copy(m, _tmp, Method); ok = _tmp$1;
+			if (!($pointerIsEqual(p.name, ptrType$4.nil)) && p.name.$get() === name) {
+				_tmp = $clone(t.Method(i), Method); _tmp$1 = true; $copy(m, _tmp, Method); ok = _tmp$1;
 				return [m, ok];
 			}
 			_i++;
@@ -4736,21 +5076,21 @@ $packages["reflect"] = (function() {
 		return [m, ok];
 	};
 	uncommonType.prototype.MethodByName = function(name) { return this.$val.MethodByName(name); };
-	rtype.Ptr.prototype.NumMethod = function() {
+	rtype.ptr.prototype.NumMethod = function() {
 		var t, tt;
 		t = this;
 		if (t.Kind() === 20) {
-			tt = t.interfaceType;
+			tt = t.kindType;
 			return tt.NumMethod();
 		}
 		return t.uncommonType.NumMethod();
 	};
 	rtype.prototype.NumMethod = function() { return this.$val.NumMethod(); };
-	rtype.Ptr.prototype.Method = function(i) {
-		var m = new Method.Ptr(), t, tt;
+	rtype.ptr.prototype.Method = function(i) {
+		var m = new Method.ptr(), t, tt;
 		t = this;
 		if (t.Kind() === 20) {
-			tt = t.interfaceType;
+			tt = t.kindType;
 			$copy(m, tt.Method(i), Method);
 			return m;
 		}
@@ -4758,11 +5098,11 @@ $packages["reflect"] = (function() {
 		return m;
 	};
 	rtype.prototype.Method = function(i) { return this.$val.Method(i); };
-	rtype.Ptr.prototype.MethodByName = function(name) {
-		var m = new Method.Ptr(), ok = false, t, tt, _tuple, _tuple$1;
+	rtype.ptr.prototype.MethodByName = function(name) {
+		var _tuple, _tuple$1, m = new Method.ptr(), ok = false, t, tt;
 		t = this;
 		if (t.Kind() === 20) {
-			tt = t.interfaceType;
+			tt = t.kindType;
 			_tuple = tt.MethodByName(name); $copy(m, _tuple[0], Method); ok = _tuple[1];
 			return [m, ok];
 		}
@@ -4770,174 +5110,174 @@ $packages["reflect"] = (function() {
 		return [m, ok];
 	};
 	rtype.prototype.MethodByName = function(name) { return this.$val.MethodByName(name); };
-	rtype.Ptr.prototype.PkgPath = function() {
+	rtype.ptr.prototype.PkgPath = function() {
 		var t;
 		t = this;
 		return t.uncommonType.PkgPath();
 	};
 	rtype.prototype.PkgPath = function() { return this.$val.PkgPath(); };
-	rtype.Ptr.prototype.Name = function() {
+	rtype.ptr.prototype.Name = function() {
 		var t;
 		t = this;
 		return t.uncommonType.Name();
 	};
 	rtype.prototype.Name = function() { return this.$val.Name(); };
-	rtype.Ptr.prototype.ChanDir = function() {
+	rtype.ptr.prototype.ChanDir = function() {
 		var t, tt;
 		t = this;
 		if (!((t.Kind() === 18))) {
 			$panic(new $String("reflect: ChanDir of non-chan type"));
 		}
-		tt = t.chanType;
+		tt = t.kindType;
 		return (tt.dir >> 0);
 	};
 	rtype.prototype.ChanDir = function() { return this.$val.ChanDir(); };
-	rtype.Ptr.prototype.IsVariadic = function() {
+	rtype.ptr.prototype.IsVariadic = function() {
 		var t, tt;
 		t = this;
 		if (!((t.Kind() === 19))) {
 			$panic(new $String("reflect: IsVariadic of non-func type"));
 		}
-		tt = t.funcType;
+		tt = t.kindType;
 		return tt.dotdotdot;
 	};
 	rtype.prototype.IsVariadic = function() { return this.$val.IsVariadic(); };
-	rtype.Ptr.prototype.Elem = function() {
-		var t, _ref, tt, tt$1, tt$2, tt$3, tt$4;
+	rtype.ptr.prototype.Elem = function() {
+		var _ref, t, tt, tt$1, tt$2, tt$3, tt$4;
 		t = this;
 		_ref = t.Kind();
 		if (_ref === 17) {
-			tt = t.arrayType;
+			tt = t.kindType;
 			return toType(tt.elem);
 		} else if (_ref === 18) {
-			tt$1 = t.chanType;
+			tt$1 = t.kindType;
 			return toType(tt$1.elem);
 		} else if (_ref === 21) {
-			tt$2 = t.mapType;
+			tt$2 = t.kindType;
 			return toType(tt$2.elem);
 		} else if (_ref === 22) {
-			tt$3 = t.ptrType;
+			tt$3 = t.kindType;
 			return toType(tt$3.elem);
 		} else if (_ref === 23) {
-			tt$4 = t.sliceType;
+			tt$4 = t.kindType;
 			return toType(tt$4.elem);
 		}
 		$panic(new $String("reflect: Elem of invalid type"));
 	};
 	rtype.prototype.Elem = function() { return this.$val.Elem(); };
-	rtype.Ptr.prototype.Field = function(i) {
+	rtype.ptr.prototype.Field = function(i) {
 		var t, tt;
 		t = this;
 		if (!((t.Kind() === 25))) {
 			$panic(new $String("reflect: Field of non-struct type"));
 		}
-		tt = t.structType;
+		tt = t.kindType;
 		return tt.Field(i);
 	};
 	rtype.prototype.Field = function(i) { return this.$val.Field(i); };
-	rtype.Ptr.prototype.FieldByIndex = function(index) {
+	rtype.ptr.prototype.FieldByIndex = function(index) {
 		var t, tt;
 		t = this;
 		if (!((t.Kind() === 25))) {
 			$panic(new $String("reflect: FieldByIndex of non-struct type"));
 		}
-		tt = t.structType;
+		tt = t.kindType;
 		return tt.FieldByIndex(index);
 	};
 	rtype.prototype.FieldByIndex = function(index) { return this.$val.FieldByIndex(index); };
-	rtype.Ptr.prototype.FieldByName = function(name) {
+	rtype.ptr.prototype.FieldByName = function(name) {
 		var t, tt;
 		t = this;
 		if (!((t.Kind() === 25))) {
 			$panic(new $String("reflect: FieldByName of non-struct type"));
 		}
-		tt = t.structType;
+		tt = t.kindType;
 		return tt.FieldByName(name);
 	};
 	rtype.prototype.FieldByName = function(name) { return this.$val.FieldByName(name); };
-	rtype.Ptr.prototype.FieldByNameFunc = function(match) {
+	rtype.ptr.prototype.FieldByNameFunc = function(match) {
 		var t, tt;
 		t = this;
 		if (!((t.Kind() === 25))) {
 			$panic(new $String("reflect: FieldByNameFunc of non-struct type"));
 		}
-		tt = t.structType;
+		tt = t.kindType;
 		return tt.FieldByNameFunc(match);
 	};
 	rtype.prototype.FieldByNameFunc = function(match) { return this.$val.FieldByNameFunc(match); };
-	rtype.Ptr.prototype.In = function(i) {
+	rtype.ptr.prototype.In = function(i) {
 		var t, tt, x;
 		t = this;
 		if (!((t.Kind() === 19))) {
 			$panic(new $String("reflect: In of non-func type"));
 		}
-		tt = t.funcType;
+		tt = t.kindType;
 		return toType((x = tt.in$2, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i])));
 	};
 	rtype.prototype.In = function(i) { return this.$val.In(i); };
-	rtype.Ptr.prototype.Key = function() {
+	rtype.ptr.prototype.Key = function() {
 		var t, tt;
 		t = this;
 		if (!((t.Kind() === 21))) {
 			$panic(new $String("reflect: Key of non-map type"));
 		}
-		tt = t.mapType;
+		tt = t.kindType;
 		return toType(tt.key);
 	};
 	rtype.prototype.Key = function() { return this.$val.Key(); };
-	rtype.Ptr.prototype.Len = function() {
+	rtype.ptr.prototype.Len = function() {
 		var t, tt;
 		t = this;
 		if (!((t.Kind() === 17))) {
 			$panic(new $String("reflect: Len of non-array type"));
 		}
-		tt = t.arrayType;
+		tt = t.kindType;
 		return (tt.len >> 0);
 	};
 	rtype.prototype.Len = function() { return this.$val.Len(); };
-	rtype.Ptr.prototype.NumField = function() {
+	rtype.ptr.prototype.NumField = function() {
 		var t, tt;
 		t = this;
 		if (!((t.Kind() === 25))) {
 			$panic(new $String("reflect: NumField of non-struct type"));
 		}
-		tt = t.structType;
+		tt = t.kindType;
 		return tt.fields.$length;
 	};
 	rtype.prototype.NumField = function() { return this.$val.NumField(); };
-	rtype.Ptr.prototype.NumIn = function() {
+	rtype.ptr.prototype.NumIn = function() {
 		var t, tt;
 		t = this;
 		if (!((t.Kind() === 19))) {
 			$panic(new $String("reflect: NumIn of non-func type"));
 		}
-		tt = t.funcType;
+		tt = t.kindType;
 		return tt.in$2.$length;
 	};
 	rtype.prototype.NumIn = function() { return this.$val.NumIn(); };
-	rtype.Ptr.prototype.NumOut = function() {
+	rtype.ptr.prototype.NumOut = function() {
 		var t, tt;
 		t = this;
 		if (!((t.Kind() === 19))) {
 			$panic(new $String("reflect: NumOut of non-func type"));
 		}
-		tt = t.funcType;
+		tt = t.kindType;
 		return tt.out.$length;
 	};
 	rtype.prototype.NumOut = function() { return this.$val.NumOut(); };
-	rtype.Ptr.prototype.Out = function(i) {
+	rtype.ptr.prototype.Out = function(i) {
 		var t, tt, x;
 		t = this;
 		if (!((t.Kind() === 19))) {
 			$panic(new $String("reflect: Out of non-func type"));
 		}
-		tt = t.funcType;
+		tt = t.kindType;
 		return toType((x = tt.out, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i])));
 	};
 	rtype.prototype.Out = function(i) { return this.$val.Out(i); };
 	ChanDir.prototype.String = function() {
-		var d, _ref;
-		d = this.$val !== undefined ? this.$val : this;
+		var _ref, d;
+		d = this.$val;
 		_ref = d;
 		if (_ref === 2) {
 			return "chan<-";
@@ -4949,15 +5289,15 @@ $packages["reflect"] = (function() {
 		return "ChanDir" + strconv.Itoa((d >> 0));
 	};
 	$ptrType(ChanDir).prototype.String = function() { return new ChanDir(this.$get()).String(); };
-	interfaceType.Ptr.prototype.Method = function(i) {
-		var m = new Method.Ptr(), t, x, p;
+	interfaceType.ptr.prototype.Method = function(i) {
+		var m = new Method.ptr(), p, t, x;
 		t = this;
 		if (i < 0 || i >= t.methods.$length) {
 			return m;
 		}
 		p = (x = t.methods, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i]));
 		m.Name = p.name.$get();
-		if (!($pointerIsEqual(p.pkgPath, ($ptrType($String)).nil))) {
+		if (!($pointerIsEqual(p.pkgPath, ptrType$4.nil))) {
 			m.PkgPath = p.pkgPath.$get();
 		}
 		m.Type = toType(p.typ);
@@ -4965,26 +5305,26 @@ $packages["reflect"] = (function() {
 		return m;
 	};
 	interfaceType.prototype.Method = function(i) { return this.$val.Method(i); };
-	interfaceType.Ptr.prototype.NumMethod = function() {
+	interfaceType.ptr.prototype.NumMethod = function() {
 		var t;
 		t = this;
 		return t.methods.$length;
 	};
 	interfaceType.prototype.NumMethod = function() { return this.$val.NumMethod(); };
-	interfaceType.Ptr.prototype.MethodByName = function(name) {
-		var m = new Method.Ptr(), ok = false, t, p, _ref, _i, i, x, _tmp, _tmp$1;
+	interfaceType.ptr.prototype.MethodByName = function(name) {
+		var _i, _ref, _tmp, _tmp$1, i, m = new Method.ptr(), ok = false, p, t, x;
 		t = this;
-		if (t === ($ptrType(interfaceType)).nil) {
+		if (t === ptrType$10.nil) {
 			return [m, ok];
 		}
-		p = ($ptrType(imethod)).nil;
+		p = ptrType$11.nil;
 		_ref = t.methods;
 		_i = 0;
 		while (_i < _ref.$length) {
 			i = _i;
 			p = (x = t.methods, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i]));
 			if (p.name.$get() === name) {
-				_tmp = new Method.Ptr(); $copy(_tmp, t.Method(i), Method); _tmp$1 = true; $copy(m, _tmp, Method); ok = _tmp$1;
+				_tmp = $clone(t.Method(i), Method); _tmp$1 = true; $copy(m, _tmp, Method); ok = _tmp$1;
 				return [m, ok];
 			}
 			_i++;
@@ -4993,8 +5333,8 @@ $packages["reflect"] = (function() {
 	};
 	interfaceType.prototype.MethodByName = function(name) { return this.$val.MethodByName(name); };
 	StructTag.prototype.Get = function(key) {
-		var tag, i, name, qvalue, _tuple, value;
-		tag = this.$val !== undefined ? this.$val : this;
+		var _tuple, i, name, qvalue, tag, value;
+		tag = this.$val;
 		while (!(tag === "")) {
 			i = 0;
 			while (i < tag.length && (tag.charCodeAt(i) === 32)) {
@@ -5033,15 +5373,15 @@ $packages["reflect"] = (function() {
 		return "";
 	};
 	$ptrType(StructTag).prototype.Get = function(key) { return new StructTag(this.$get()).Get(key); };
-	structType.Ptr.prototype.Field = function(i) {
-		var f = new StructField.Ptr(), t, x, p, t$1;
+	structType.ptr.prototype.Field = function(i) {
+		var f = new StructField.ptr(), p, t, t$1, x;
 		t = this;
 		if (i < 0 || i >= t.fields.$length) {
 			return f;
 		}
 		p = (x = t.fields, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i]));
 		f.Type = toType(p.typ);
-		if (!($pointerIsEqual(p.name, ($ptrType($String)).nil))) {
+		if (!($pointerIsEqual(p.name, ptrType$4.nil))) {
 			f.Name = p.name.$get();
 		} else {
 			t$1 = f.Type;
@@ -5051,19 +5391,19 @@ $packages["reflect"] = (function() {
 			f.Name = t$1.Name();
 			f.Anonymous = true;
 		}
-		if (!($pointerIsEqual(p.pkgPath, ($ptrType($String)).nil))) {
+		if (!($pointerIsEqual(p.pkgPath, ptrType$4.nil))) {
 			f.PkgPath = p.pkgPath.$get();
 		}
-		if (!($pointerIsEqual(p.tag, ($ptrType($String)).nil))) {
+		if (!($pointerIsEqual(p.tag, ptrType$4.nil))) {
 			f.Tag = p.tag.$get();
 		}
 		f.Offset = p.offset;
-		f.Index = new ($sliceType($Int))([i]);
+		f.Index = new sliceType$9([i]);
 		return f;
 	};
 	structType.prototype.Field = function(i) { return this.$val.Field(i); };
-	structType.Ptr.prototype.FieldByIndex = function(index) {
-		var f = new StructField.Ptr(), t, _ref, _i, i, x, ft;
+	structType.ptr.prototype.FieldByIndex = function(index) {
+		var _i, _ref, f = new StructField.ptr(), ft, i, t, x;
 		t = this;
 		f.Type = toType(t.rtype);
 		_ref = index;
@@ -5084,11 +5424,11 @@ $packages["reflect"] = (function() {
 		return f;
 	};
 	structType.prototype.FieldByIndex = function(index) { return this.$val.FieldByIndex(index); };
-	structType.Ptr.prototype.FieldByNameFunc = function(match) {
-		var result = new StructField.Ptr(), ok = false, t, current, next, nextCount, visited, _map, _key, _tmp, _tmp$1, count, _ref, _i, scan, t$1, _entry, _key$1, _ref$1, _i$1, i, x, f, fname, ntyp, _entry$1, _tmp$2, _tmp$3, styp, _entry$2, _key$2, _map$1, _key$3, _key$4, _entry$3, _key$5, index;
+	structType.ptr.prototype.FieldByNameFunc = function(match) {
+		var _entry, _entry$1, _entry$2, _entry$3, _i, _i$1, _key, _key$1, _key$2, _key$3, _key$4, _key$5, _map, _map$1, _ref, _ref$1, _tmp, _tmp$1, _tmp$2, _tmp$3, count, current, f, fname, i, index, next, nextCount, ntyp, ok = false, result = new StructField.ptr(), scan, styp, t, t$1, visited, x;
 		t = this;
-		current = new ($sliceType(fieldScan))([]);
-		next = new ($sliceType(fieldScan))([new fieldScan.Ptr(t, ($sliceType($Int)).nil)]);
+		current = new sliceType$10([]);
+		next = new sliceType$10([new fieldScan.ptr(t, sliceType$9.nil)]);
 		nextCount = false;
 		visited = (_map = new $Map(), _map);
 		while (next.$length > 0) {
@@ -5098,7 +5438,7 @@ $packages["reflect"] = (function() {
 			_ref = current;
 			_i = 0;
 			while (_i < _ref.$length) {
-				scan = new fieldScan.Ptr(); $copy(scan, ((_i < 0 || _i >= _ref.$length) ? $throwRuntimeError("index out of range") : _ref.$array[_ref.$offset + _i]), fieldScan);
+				scan = $clone(((_i < 0 || _i >= _ref.$length) ? $throwRuntimeError("index out of range") : _ref.$array[_ref.$offset + _i]), fieldScan);
 				t$1 = scan.typ;
 				if ((_entry = visited[t$1.$key()], _entry !== undefined ? _entry.v : false)) {
 					_i++;
@@ -5111,8 +5451,8 @@ $packages["reflect"] = (function() {
 					i = _i$1;
 					f = (x = t$1.fields, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i]));
 					fname = "";
-					ntyp = ($ptrType(rtype)).nil;
-					if (!($pointerIsEqual(f.name, ($ptrType($String)).nil))) {
+					ntyp = ptrType$1.nil;
+					if (!($pointerIsEqual(f.name, ptrType$4.nil))) {
 						fname = f.name.$get();
 					} else {
 						ntyp = f.typ;
@@ -5123,22 +5463,22 @@ $packages["reflect"] = (function() {
 					}
 					if (match(fname)) {
 						if ((_entry$1 = count[t$1.$key()], _entry$1 !== undefined ? _entry$1.v : 0) > 1 || ok) {
-							_tmp$2 = new StructField.Ptr("", "", $ifaceNil, "", 0, ($sliceType($Int)).nil, false); _tmp$3 = false; $copy(result, _tmp$2, StructField); ok = _tmp$3;
+							_tmp$2 = new StructField.ptr("", "", $ifaceNil, "", 0, sliceType$9.nil, false); _tmp$3 = false; $copy(result, _tmp$2, StructField); ok = _tmp$3;
 							return [result, ok];
 						}
 						$copy(result, t$1.Field(i), StructField);
-						result.Index = ($sliceType($Int)).nil;
+						result.Index = sliceType$9.nil;
 						result.Index = $appendSlice(result.Index, scan.index);
 						result.Index = $append(result.Index, i);
 						ok = true;
 						_i$1++;
 						continue;
 					}
-					if (ok || ntyp === ($ptrType(rtype)).nil || !((ntyp.Kind() === 25))) {
+					if (ok || ntyp === ptrType$1.nil || !((ntyp.Kind() === 25))) {
 						_i$1++;
 						continue;
 					}
-					styp = ntyp.structType;
+					styp = ntyp.kindType;
 					if ((_entry$2 = nextCount[styp.$key()], _entry$2 !== undefined ? _entry$2.v : 0) > 0) {
 						_key$2 = styp; (nextCount || $throwRuntimeError("assignment to entry in nil map"))[_key$2.$key()] = { k: _key$2, v: 2 };
 						_i$1++;
@@ -5151,10 +5491,10 @@ $packages["reflect"] = (function() {
 					if ((_entry$3 = count[t$1.$key()], _entry$3 !== undefined ? _entry$3.v : 0) > 1) {
 						_key$5 = styp; (nextCount || $throwRuntimeError("assignment to entry in nil map"))[_key$5.$key()] = { k: _key$5, v: 2 };
 					}
-					index = ($sliceType($Int)).nil;
+					index = sliceType$9.nil;
 					index = $appendSlice(index, scan.index);
 					index = $append(index, i);
-					next = $append(next, new fieldScan.Ptr(styp, index));
+					next = $append(next, new fieldScan.ptr(styp, index));
 					_i$1++;
 				}
 				_i++;
@@ -5166,8 +5506,8 @@ $packages["reflect"] = (function() {
 		return [result, ok];
 	};
 	structType.prototype.FieldByNameFunc = function(match) { return this.$val.FieldByNameFunc(match); };
-	structType.Ptr.prototype.FieldByName = function(name) {
-		var f = new StructField.Ptr(), present = false, t, hasAnon, _ref, _i, i, x, tf, _tmp, _tmp$1, _tuple;
+	structType.ptr.prototype.FieldByName = function(name) {
+		var _i, _ref, _tmp, _tmp$1, _tuple, f = new StructField.ptr(), hasAnon, i, present = false, t, tf, x;
 		t = this;
 		hasAnon = false;
 		if (!(name === "")) {
@@ -5176,13 +5516,13 @@ $packages["reflect"] = (function() {
 			while (_i < _ref.$length) {
 				i = _i;
 				tf = (x = t.fields, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i]));
-				if ($pointerIsEqual(tf.name, ($ptrType($String)).nil)) {
+				if ($pointerIsEqual(tf.name, ptrType$4.nil)) {
 					hasAnon = true;
 					_i++;
 					continue;
 				}
 				if (tf.name.$get() === name) {
-					_tmp = new StructField.Ptr(); $copy(_tmp, t.Field(i), StructField); _tmp$1 = true; $copy(f, _tmp, StructField); present = _tmp$1;
+					_tmp = $clone(t.Field(i), StructField); _tmp$1 = true; $copy(f, _tmp, StructField); present = _tmp$1;
 					return [f, present];
 				}
 				_i++;
@@ -5198,9 +5538,9 @@ $packages["reflect"] = (function() {
 	};
 	structType.prototype.FieldByName = function(name) { return this.$val.FieldByName(name); };
 	PtrTo = $pkg.PtrTo = function(t) {
-		return $assertType(t, ($ptrType(rtype))).ptrTo();
+		return $assertType(t, ptrType$1).ptrTo();
 	};
-	rtype.Ptr.prototype.Implements = function(u) {
+	rtype.ptr.prototype.Implements = function(u) {
 		var t;
 		t = this;
 		if ($interfaceIsEqual(u, $ifaceNil)) {
@@ -5209,40 +5549,40 @@ $packages["reflect"] = (function() {
 		if (!((u.Kind() === 20))) {
 			$panic(new $String("reflect: non-interface type passed to Type.Implements"));
 		}
-		return implements$1($assertType(u, ($ptrType(rtype))), t);
+		return implements$1($assertType(u, ptrType$1), t);
 	};
 	rtype.prototype.Implements = function(u) { return this.$val.Implements(u); };
-	rtype.Ptr.prototype.AssignableTo = function(u) {
+	rtype.ptr.prototype.AssignableTo = function(u) {
 		var t, uu;
 		t = this;
 		if ($interfaceIsEqual(u, $ifaceNil)) {
 			$panic(new $String("reflect: nil type passed to Type.AssignableTo"));
 		}
-		uu = $assertType(u, ($ptrType(rtype)));
+		uu = $assertType(u, ptrType$1);
 		return directlyAssignable(uu, t) || implements$1(uu, t);
 	};
 	rtype.prototype.AssignableTo = function(u) { return this.$val.AssignableTo(u); };
-	rtype.Ptr.prototype.ConvertibleTo = function(u) {
+	rtype.ptr.prototype.ConvertibleTo = function(u) {
 		var t, uu;
 		t = this;
 		if ($interfaceIsEqual(u, $ifaceNil)) {
 			$panic(new $String("reflect: nil type passed to Type.ConvertibleTo"));
 		}
-		uu = $assertType(u, ($ptrType(rtype)));
+		uu = $assertType(u, ptrType$1);
 		return !(convertOp(uu, t) === $throwNilPointerError);
 	};
 	rtype.prototype.ConvertibleTo = function(u) { return this.$val.ConvertibleTo(u); };
 	implements$1 = function(T, V) {
-		var t, v, i, j, x, tm, x$1, vm, v$1, i$1, j$1, x$2, tm$1, x$3, vm$1;
+		var i, i$1, j, j$1, t, tm, tm$1, v, v$1, vm, vm$1, x, x$1, x$2, x$3;
 		if (!((T.Kind() === 20))) {
 			return false;
 		}
-		t = T.interfaceType;
+		t = T.kindType;
 		if (t.methods.$length === 0) {
 			return true;
 		}
 		if (V.Kind() === 20) {
-			v = V.interfaceType;
+			v = V.kindType;
 			i = 0;
 			j = 0;
 			while (j < v.methods.$length) {
@@ -5259,7 +5599,7 @@ $packages["reflect"] = (function() {
 			return false;
 		}
 		v$1 = V.uncommonType.uncommon();
-		if (v$1 === ($ptrType(uncommonType)).nil) {
+		if (v$1 === ptrType$5.nil) {
 			return false;
 		}
 		i$1 = 0;
@@ -5287,7 +5627,7 @@ $packages["reflect"] = (function() {
 		return haveIdenticalUnderlyingType(T, V);
 	};
 	haveIdenticalUnderlyingType = function(T, V) {
-		var kind, _ref, t, v, _ref$1, _i, i, typ, x, _ref$2, _i$1, i$1, typ$1, x$1, t$1, v$1, t$2, v$2, _ref$3, _i$2, i$2, x$2, tf, x$3, vf;
+		var _i, _i$1, _i$2, _ref, _ref$1, _ref$2, _ref$3, i, i$1, i$2, kind, t, t$1, t$2, tf, typ, typ$1, v, v$1, v$2, vf, x, x$1, x$2, x$3;
 		if (T === V) {
 			return true;
 		}
@@ -5307,8 +5647,8 @@ $packages["reflect"] = (function() {
 			}
 			return (V.ChanDir() === T.ChanDir()) && $interfaceIsEqual(T.Elem(), V.Elem());
 		} else if (_ref === 19) {
-			t = T.funcType;
-			v = V.funcType;
+			t = T.kindType;
+			v = V.kindType;
 			if (!(t.dotdotdot === v.dotdotdot) || !((t.in$2.$length === v.in$2.$length)) || !((t.out.$length === v.out.$length))) {
 				return false;
 			}
@@ -5334,8 +5674,8 @@ $packages["reflect"] = (function() {
 			}
 			return true;
 		} else if (_ref === 20) {
-			t$1 = T.interfaceType;
-			v$1 = V.interfaceType;
+			t$1 = T.kindType;
+			v$1 = V.kindType;
 			if ((t$1.methods.$length === 0) && (v$1.methods.$length === 0)) {
 				return true;
 			}
@@ -5345,8 +5685,8 @@ $packages["reflect"] = (function() {
 		} else if (_ref === 22 || _ref === 23) {
 			return $interfaceIsEqual(T.Elem(), V.Elem());
 		} else if (_ref === 25) {
-			t$2 = T.structType;
-			v$2 = V.structType;
+			t$2 = T.kindType;
+			v$2 = V.kindType;
 			if (!((t$2.fields.$length === v$2.fields.$length))) {
 				return false;
 			}
@@ -5356,16 +5696,16 @@ $packages["reflect"] = (function() {
 				i$2 = _i$2;
 				tf = (x$2 = t$2.fields, ((i$2 < 0 || i$2 >= x$2.$length) ? $throwRuntimeError("index out of range") : x$2.$array[x$2.$offset + i$2]));
 				vf = (x$3 = v$2.fields, ((i$2 < 0 || i$2 >= x$3.$length) ? $throwRuntimeError("index out of range") : x$3.$array[x$3.$offset + i$2]));
-				if (!($pointerIsEqual(tf.name, vf.name)) && ($pointerIsEqual(tf.name, ($ptrType($String)).nil) || $pointerIsEqual(vf.name, ($ptrType($String)).nil) || !(tf.name.$get() === vf.name.$get()))) {
+				if (!($pointerIsEqual(tf.name, vf.name)) && ($pointerIsEqual(tf.name, ptrType$4.nil) || $pointerIsEqual(vf.name, ptrType$4.nil) || !(tf.name.$get() === vf.name.$get()))) {
 					return false;
 				}
-				if (!($pointerIsEqual(tf.pkgPath, vf.pkgPath)) && ($pointerIsEqual(tf.pkgPath, ($ptrType($String)).nil) || $pointerIsEqual(vf.pkgPath, ($ptrType($String)).nil) || !(tf.pkgPath.$get() === vf.pkgPath.$get()))) {
+				if (!($pointerIsEqual(tf.pkgPath, vf.pkgPath)) && ($pointerIsEqual(tf.pkgPath, ptrType$4.nil) || $pointerIsEqual(vf.pkgPath, ptrType$4.nil) || !(tf.pkgPath.$get() === vf.pkgPath.$get()))) {
 					return false;
 				}
 				if (!(tf.typ === vf.typ)) {
 					return false;
 				}
-				if (!($pointerIsEqual(tf.tag, vf.tag)) && ($pointerIsEqual(tf.tag, ($ptrType($String)).nil) || $pointerIsEqual(vf.tag, ($ptrType($String)).nil) || !(tf.tag.$get() === vf.tag.$get()))) {
+				if (!($pointerIsEqual(tf.tag, vf.tag)) && ($pointerIsEqual(tf.tag, ptrType$4.nil) || $pointerIsEqual(vf.tag, ptrType$4.nil) || !(tf.tag.$get() === vf.tag.$get()))) {
 					return false;
 				}
 				if (!((tf.offset === vf.offset))) {
@@ -5378,159 +5718,158 @@ $packages["reflect"] = (function() {
 		return false;
 	};
 	toType = function(t) {
-		if (t === ($ptrType(rtype)).nil) {
+		if (t === ptrType$1.nil) {
 			return $ifaceNil;
 		}
 		return t;
 	};
+	ifaceIndir = function(t) {
+		return ((t.kind & 32) >>> 0) === 0;
+	};
 	flag.prototype.kind = function() {
 		var f;
-		f = this.$val !== undefined ? this.$val : this;
-		return (((((f >>> 4 >>> 0)) & 31) >>> 0) >>> 0);
+		f = this.$val;
+		return (((f & 31) >>> 0) >>> 0);
 	};
 	$ptrType(flag).prototype.kind = function() { return new flag(this.$get()).kind(); };
-	Value.Ptr.prototype.pointer = function() {
+	Value.ptr.prototype.pointer = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
+		v = this;
 		if (!((v.typ.size === 4)) || !v.typ.pointers()) {
 			$panic(new $String("can't call pointer on a non-pointer Value"));
 		}
-		if (!((((v.flag & 2) >>> 0) === 0))) {
+		if (!((((v.flag & 64) >>> 0) === 0))) {
 			return v.ptr.$get();
 		}
 		return v.ptr;
 	};
 	Value.prototype.pointer = function() { return this.$val.pointer(); };
-	ValueError.Ptr.prototype.Error = function() {
+	ValueError.ptr.prototype.Error = function() {
 		var e;
 		e = this;
 		if (e.Kind === 0) {
 			return "reflect: call of " + e.Method + " on zero Value";
 		}
-		return "reflect: call of " + e.Method + " on " + (new Kind(e.Kind)).String() + " Value";
+		return "reflect: call of " + e.Method + " on " + new Kind(e.Kind).String() + " Value";
 	};
 	ValueError.prototype.Error = function() { return this.$val.Error(); };
 	flag.prototype.mustBe = function(expected) {
-		var f, k;
-		f = this.$val !== undefined ? this.$val : this;
-		k = (new flag(f)).kind();
-		if (!((k === expected))) {
-			$panic(new ValueError.Ptr(methodName(), k));
+		var f;
+		f = this.$val;
+		if (!((new flag(f).kind() === expected))) {
+			$panic(new ValueError.ptr(methodName(), new flag(f).kind()));
 		}
 	};
 	$ptrType(flag).prototype.mustBe = function(expected) { return new flag(this.$get()).mustBe(expected); };
 	flag.prototype.mustBeExported = function() {
 		var f;
-		f = this.$val !== undefined ? this.$val : this;
+		f = this.$val;
 		if (f === 0) {
-			$panic(new ValueError.Ptr(methodName(), 0));
+			$panic(new ValueError.ptr(methodName(), 0));
 		}
-		if (!((((f & 1) >>> 0) === 0))) {
+		if (!((((f & 32) >>> 0) === 0))) {
 			$panic(new $String("reflect: " + methodName() + " using value obtained using unexported field"));
 		}
 	};
 	$ptrType(flag).prototype.mustBeExported = function() { return new flag(this.$get()).mustBeExported(); };
 	flag.prototype.mustBeAssignable = function() {
 		var f;
-		f = this.$val !== undefined ? this.$val : this;
+		f = this.$val;
 		if (f === 0) {
-			$panic(new ValueError.Ptr(methodName(), 0));
+			$panic(new ValueError.ptr(methodName(), 0));
 		}
-		if (!((((f & 1) >>> 0) === 0))) {
+		if (!((((f & 32) >>> 0) === 0))) {
 			$panic(new $String("reflect: " + methodName() + " using value obtained using unexported field"));
 		}
-		if (((f & 4) >>> 0) === 0) {
+		if (((f & 128) >>> 0) === 0) {
 			$panic(new $String("reflect: " + methodName() + " using unaddressable value"));
 		}
 	};
 	$ptrType(flag).prototype.mustBeAssignable = function() { return new flag(this.$get()).mustBeAssignable(); };
-	Value.Ptr.prototype.Addr = function() {
+	Value.ptr.prototype.Addr = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		if (((v.flag & 4) >>> 0) === 0) {
+		v = this;
+		if (((v.flag & 128) >>> 0) === 0) {
 			$panic(new $String("reflect.Value.Addr of unaddressable value"));
 		}
-		return new Value.Ptr(v.typ.ptrTo(), v.ptr, 0, ((((v.flag & 1) >>> 0)) | 352) >>> 0);
+		return new Value.ptr(v.typ.ptrTo(), v.ptr, ((((v.flag & 32) >>> 0)) | 22) >>> 0);
 	};
 	Value.prototype.Addr = function() { return this.$val.Addr(); };
-	Value.Ptr.prototype.Bool = function() {
+	Value.ptr.prototype.Bool = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(1);
-		if (!((((v.flag & 2) >>> 0) === 0))) {
-			return v.ptr.$get();
-		}
-		return v.scalar;
+		v = this;
+		new flag(v.flag).mustBe(1);
+		return v.ptr.$get();
 	};
 	Value.prototype.Bool = function() { return this.$val.Bool(); };
-	Value.Ptr.prototype.Bytes = function() {
+	Value.ptr.prototype.Bytes = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(23);
+		v = this;
+		new flag(v.flag).mustBe(23);
 		if (!((v.typ.Elem().Kind() === 8))) {
 			$panic(new $String("reflect.Value.Bytes of non-byte slice"));
 		}
 		return v.ptr.$get();
 	};
 	Value.prototype.Bytes = function() { return this.$val.Bytes(); };
-	Value.Ptr.prototype.runes = function() {
+	Value.ptr.prototype.runes = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(23);
+		v = this;
+		new flag(v.flag).mustBe(23);
 		if (!((v.typ.Elem().Kind() === 5))) {
 			$panic(new $String("reflect.Value.Bytes of non-rune slice"));
 		}
 		return v.ptr.$get();
 	};
 	Value.prototype.runes = function() { return this.$val.runes(); };
-	Value.Ptr.prototype.CanAddr = function() {
+	Value.ptr.prototype.CanAddr = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		return !((((v.flag & 4) >>> 0) === 0));
+		v = this;
+		return !((((v.flag & 128) >>> 0) === 0));
 	};
 	Value.prototype.CanAddr = function() { return this.$val.CanAddr(); };
-	Value.Ptr.prototype.CanSet = function() {
+	Value.ptr.prototype.CanSet = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		return ((v.flag & 5) >>> 0) === 4;
+		v = this;
+		return ((v.flag & 160) >>> 0) === 128;
 	};
 	Value.prototype.CanSet = function() { return this.$val.CanSet(); };
-	Value.Ptr.prototype.Call = function(in$1) {
+	Value.ptr.prototype.Call = function(in$1) {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(19);
-		(new flag(v.flag)).mustBeExported();
+		v = this;
+		new flag(v.flag).mustBe(19);
+		new flag(v.flag).mustBeExported();
 		return v.call("Call", in$1);
 	};
 	Value.prototype.Call = function(in$1) { return this.$val.Call(in$1); };
-	Value.Ptr.prototype.CallSlice = function(in$1) {
+	Value.ptr.prototype.CallSlice = function(in$1) {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(19);
-		(new flag(v.flag)).mustBeExported();
+		v = this;
+		new flag(v.flag).mustBe(19);
+		new flag(v.flag).mustBeExported();
 		return v.call("CallSlice", in$1);
 	};
 	Value.prototype.CallSlice = function(in$1) { return this.$val.CallSlice(in$1); };
-	Value.Ptr.prototype.Complex = function() {
-		var v, k, _ref, x, x$1;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.Complex = function() {
+		var _ref, k, v, x;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 15) {
-			if (!((((v.flag & 2) >>> 0) === 0))) {
-				return (x = v.ptr.$get(), new $Complex128(x.$real, x.$imag));
-			}
-			return (x$1 = v.scalar, new $Complex128(x$1.$real, x$1.$imag));
+			return (x = v.ptr.$get(), new $Complex128(x.$real, x.$imag));
 		} else if (_ref === 16) {
 			return v.ptr.$get();
 		}
-		$panic(new ValueError.Ptr("reflect.Value.Complex", k));
+		$panic(new ValueError.ptr("reflect.Value.Complex", new flag(v.flag).kind()));
 	};
 	Value.prototype.Complex = function() { return this.$val.Complex(); };
-	Value.Ptr.prototype.FieldByIndex = function(index) {
-		var v, _ref, _i, i, x;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(25);
+	Value.ptr.prototype.FieldByIndex = function(index) {
+		var _i, _ref, i, v, x;
+		v = this;
+		if (index.$length === 1) {
+			return v.Field(((0 < 0 || 0 >= index.$length) ? $throwRuntimeError("index out of range") : index.$array[index.$offset + 0]));
+		}
+		new flag(v.flag).mustBe(25);
 		_ref = index;
 		_i = 0;
 		while (_i < _ref.$length) {
@@ -5541,66 +5880,54 @@ $packages["reflect"] = (function() {
 					if (v.IsNil()) {
 						$panic(new $String("reflect: indirection through nil pointer to embedded struct"));
 					}
-					$copy(v, v.Elem(), Value);
+					v = v.Elem();
 				}
 			}
-			$copy(v, v.Field(x), Value);
+			v = v.Field(x);
 			_i++;
 		}
 		return v;
 	};
 	Value.prototype.FieldByIndex = function(index) { return this.$val.FieldByIndex(index); };
-	Value.Ptr.prototype.FieldByName = function(name) {
-		var v, _tuple, f, ok;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(25);
-		_tuple = v.typ.FieldByName(name); f = new StructField.Ptr(); $copy(f, _tuple[0], StructField); ok = _tuple[1];
+	Value.ptr.prototype.FieldByName = function(name) {
+		var _tuple, f, ok, v;
+		v = this;
+		new flag(v.flag).mustBe(25);
+		_tuple = v.typ.FieldByName(name); f = $clone(_tuple[0], StructField); ok = _tuple[1];
 		if (ok) {
 			return v.FieldByIndex(f.Index);
 		}
-		return new Value.Ptr(($ptrType(rtype)).nil, 0, 0, 0);
+		return new Value.ptr(ptrType$1.nil, 0, 0);
 	};
 	Value.prototype.FieldByName = function(name) { return this.$val.FieldByName(name); };
-	Value.Ptr.prototype.FieldByNameFunc = function(match) {
-		var v, _tuple, f, ok;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(25);
-		_tuple = v.typ.FieldByNameFunc(match); f = new StructField.Ptr(); $copy(f, _tuple[0], StructField); ok = _tuple[1];
+	Value.ptr.prototype.FieldByNameFunc = function(match) {
+		var _tuple, f, ok, v;
+		v = this;
+		_tuple = v.typ.FieldByNameFunc(match); f = $clone(_tuple[0], StructField); ok = _tuple[1];
 		if (ok) {
 			return v.FieldByIndex(f.Index);
 		}
-		return new Value.Ptr(($ptrType(rtype)).nil, 0, 0, 0);
+		return new Value.ptr(ptrType$1.nil, 0, 0);
 	};
 	Value.prototype.FieldByNameFunc = function(match) { return this.$val.FieldByNameFunc(match); };
-	Value.Ptr.prototype.Float = function() {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.Float = function() {
+		var _ref, k, v;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 13) {
-			if (!((((v.flag & 2) >>> 0) === 0))) {
-				return $coerceFloat32(v.ptr.$get());
-			}
-			return $coerceFloat32(v.scalar);
+			return $coerceFloat32(v.ptr.$get());
 		} else if (_ref === 14) {
-			if (!((((v.flag & 2) >>> 0) === 0))) {
-				return v.ptr.$get();
-			}
-			return v.scalar;
+			return v.ptr.$get();
 		}
-		$panic(new ValueError.Ptr("reflect.Value.Float", k));
+		$panic(new ValueError.ptr("reflect.Value.Float", new flag(v.flag).kind()));
 	};
 	Value.prototype.Float = function() { return this.$val.Float(); };
-	Value.Ptr.prototype.Int = function() {
-		var v, k, p, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
-		p = 0;
-		if (!((((v.flag & 2) >>> 0) === 0))) {
-			p = v.ptr;
-		} else {
-			p = new ($ptrType($Uintptr))(function() { return this.$target.scalar; }, function($v) { this.$target.scalar = $v; }, v);
-		}
+	Value.ptr.prototype.Int = function() {
+		var _ref, k, p, v;
+		v = this;
+		k = new flag(v.flag).kind();
+		p = v.ptr;
 		_ref = k;
 		if (_ref === 2) {
 			return new $Int64(0, p.$get());
@@ -5613,90 +5940,87 @@ $packages["reflect"] = (function() {
 		} else if (_ref === 6) {
 			return p.$get();
 		}
-		$panic(new ValueError.Ptr("reflect.Value.Int", k));
+		$panic(new ValueError.ptr("reflect.Value.Int", new flag(v.flag).kind()));
 	};
 	Value.prototype.Int = function() { return this.$val.Int(); };
-	Value.Ptr.prototype.CanInterface = function() {
+	Value.ptr.prototype.CanInterface = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
+		v = this;
 		if (v.flag === 0) {
-			$panic(new ValueError.Ptr("reflect.Value.CanInterface", 0));
+			$panic(new ValueError.ptr("reflect.Value.CanInterface", 0));
 		}
-		return ((v.flag & 1) >>> 0) === 0;
+		return ((v.flag & 32) >>> 0) === 0;
 	};
 	Value.prototype.CanInterface = function() { return this.$val.CanInterface(); };
-	Value.Ptr.prototype.Interface = function() {
+	Value.ptr.prototype.Interface = function() {
 		var i = $ifaceNil, v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		i = valueInterface($clone(v, Value), true);
+		v = this;
+		i = valueInterface(v, true);
 		return i;
 	};
 	Value.prototype.Interface = function() { return this.$val.Interface(); };
-	Value.Ptr.prototype.InterfaceData = function() {
+	Value.ptr.prototype.InterfaceData = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(20);
+		v = this;
+		new flag(v.flag).mustBe(20);
 		return v.ptr;
 	};
 	Value.prototype.InterfaceData = function() { return this.$val.InterfaceData(); };
-	Value.Ptr.prototype.IsValid = function() {
+	Value.ptr.prototype.IsValid = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
+		v = this;
 		return !((v.flag === 0));
 	};
 	Value.prototype.IsValid = function() { return this.$val.IsValid(); };
-	Value.Ptr.prototype.Kind = function() {
+	Value.ptr.prototype.Kind = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		return (new flag(v.flag)).kind();
+		v = this;
+		return new flag(v.flag).kind();
 	};
 	Value.prototype.Kind = function() { return this.$val.Kind(); };
-	Value.Ptr.prototype.MapIndex = function(key) {
-		var v, tt, k, e, typ, fl, c;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(21);
-		tt = v.typ.mapType;
-		$copy(key, key.assignTo("reflect.Value.MapIndex", tt.key, ($ptrType($emptyInterface)).nil), Value);
+	Value.ptr.prototype.MapIndex = function(key) {
+		var c, e, fl, k, tt, typ, v;
+		v = this;
+		key = key;
+		new flag(v.flag).mustBe(21);
+		tt = v.typ.kindType;
+		key = key.assignTo("reflect.Value.MapIndex", tt.key, 0);
 		k = 0;
-		if (!((((key.flag & 2) >>> 0) === 0))) {
+		if (!((((key.flag & 64) >>> 0) === 0))) {
 			k = key.ptr;
-		} else if (key.typ.pointers()) {
-			k = new ($ptrType($UnsafePointer))(function() { return this.$target.ptr; }, function($v) { this.$target.ptr = $v; }, key);
 		} else {
-			k = new ($ptrType($Uintptr))(function() { return this.$target.scalar; }, function($v) { this.$target.scalar = $v; }, key);
+			k = new ptrType$17(function() { return this.$target.ptr; }, function($v) { this.$target.ptr = $v; }, key);
 		}
 		e = mapaccess(v.typ, v.pointer(), k);
 		if (e === 0) {
-			return new Value.Ptr(($ptrType(rtype)).nil, 0, 0, 0);
+			return new Value.ptr(ptrType$1.nil, 0, 0);
 		}
 		typ = tt.elem;
-		fl = ((((v.flag | key.flag) >>> 0)) & 1) >>> 0;
-		fl = (fl | (((typ.Kind() >>> 0) << 4 >>> 0))) >>> 0;
-		if (typ.size > 4) {
+		fl = ((((v.flag | key.flag) >>> 0)) & 32) >>> 0;
+		fl = (fl | ((typ.Kind() >>> 0))) >>> 0;
+		if (ifaceIndir(typ)) {
 			c = unsafe_New(typ);
 			memmove(c, e, typ.size);
-			return new Value.Ptr(typ, c, 0, (fl | 2) >>> 0);
-		} else if (typ.pointers()) {
-			return new Value.Ptr(typ, e.$get(), 0, fl);
+			return new Value.ptr(typ, c, (fl | 64) >>> 0);
 		} else {
-			return new Value.Ptr(typ, 0, loadScalar(e, typ.size), fl);
+			return new Value.ptr(typ, e.$get(), fl);
 		}
 	};
 	Value.prototype.MapIndex = function(key) { return this.$val.MapIndex(key); };
-	Value.Ptr.prototype.MapKeys = function() {
-		var v, tt, keyType, fl, m, mlen, it, a, i, key, c;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(21);
-		tt = v.typ.mapType;
+	Value.ptr.prototype.MapKeys = function() {
+		var a, c, fl, i, it, key, keyType, m, mlen, tt, v;
+		v = this;
+		new flag(v.flag).mustBe(21);
+		tt = v.typ.kindType;
 		keyType = tt.key;
-		fl = (((v.flag & 1) >>> 0) | ((keyType.Kind() >>> 0) << 4 >>> 0)) >>> 0;
+		fl = (((v.flag & 32) >>> 0) | (keyType.Kind() >>> 0)) >>> 0;
 		m = v.pointer();
 		mlen = 0;
 		if (!(m === 0)) {
 			mlen = maplen(m);
 		}
 		it = mapiterinit(v.typ, m);
-		a = ($sliceType(Value)).make(mlen);
+		a = $makeSlice(sliceType$6, mlen);
 		i = 0;
 		i = 0;
 		while (i < a.$length) {
@@ -5704,14 +6028,12 @@ $packages["reflect"] = (function() {
 			if (key === 0) {
 				break;
 			}
-			if (keyType.size > 4) {
+			if (ifaceIndir(keyType)) {
 				c = unsafe_New(keyType);
 				memmove(c, key, keyType.size);
-				$copy(((i < 0 || i >= a.$length) ? $throwRuntimeError("index out of range") : a.$array[a.$offset + i]), new Value.Ptr(keyType, c, 0, (fl | 2) >>> 0), Value);
-			} else if (keyType.pointers()) {
-				$copy(((i < 0 || i >= a.$length) ? $throwRuntimeError("index out of range") : a.$array[a.$offset + i]), new Value.Ptr(keyType, key.$get(), 0, fl), Value);
+				(i < 0 || i >= a.$length) ? $throwRuntimeError("index out of range") : a.$array[a.$offset + i] = new Value.ptr(keyType, c, (fl | 64) >>> 0);
 			} else {
-				$copy(((i < 0 || i >= a.$length) ? $throwRuntimeError("index out of range") : a.$array[a.$offset + i]), new Value.Ptr(keyType, 0, loadScalar(key, keyType.size), fl), Value);
+				(i < 0 || i >= a.$length) ? $throwRuntimeError("index out of range") : a.$array[a.$offset + i] = new Value.ptr(keyType, key.$get(), fl);
 			}
 			mapiternext(it);
 			i = i + (1) >> 0;
@@ -5719,84 +6041,84 @@ $packages["reflect"] = (function() {
 		return $subslice(a, 0, i);
 	};
 	Value.prototype.MapKeys = function() { return this.$val.MapKeys(); };
-	Value.Ptr.prototype.Method = function(i) {
-		var v, fl;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		if (v.typ === ($ptrType(rtype)).nil) {
-			$panic(new ValueError.Ptr("reflect.Value.Method", 0));
+	Value.ptr.prototype.Method = function(i) {
+		var fl, v;
+		v = this;
+		if (v.typ === ptrType$1.nil) {
+			$panic(new ValueError.ptr("reflect.Value.Method", 0));
 		}
-		if (!((((v.flag & 8) >>> 0) === 0)) || i < 0 || i >= v.typ.NumMethod()) {
+		if (!((((v.flag & 256) >>> 0) === 0)) || (i >>> 0) >= (v.typ.NumMethod() >>> 0)) {
 			$panic(new $String("reflect: Method index out of range"));
 		}
 		if ((v.typ.Kind() === 20) && v.IsNil()) {
 			$panic(new $String("reflect: Method on nil interface value"));
 		}
-		fl = (v.flag & 3) >>> 0;
-		fl = (fl | (304)) >>> 0;
-		fl = (fl | (((((i >>> 0) << 9 >>> 0) | 8) >>> 0))) >>> 0;
-		return new Value.Ptr(v.typ, v.ptr, v.scalar, fl);
+		fl = (v.flag & 96) >>> 0;
+		fl = (fl | (19)) >>> 0;
+		fl = (fl | (((((i >>> 0) << 9 >>> 0) | 256) >>> 0))) >>> 0;
+		return new Value.ptr(v.typ, v.ptr, fl);
 	};
 	Value.prototype.Method = function(i) { return this.$val.Method(i); };
-	Value.Ptr.prototype.NumMethod = function() {
+	Value.ptr.prototype.NumMethod = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		if (v.typ === ($ptrType(rtype)).nil) {
-			$panic(new ValueError.Ptr("reflect.Value.NumMethod", 0));
+		v = this;
+		if (v.typ === ptrType$1.nil) {
+			$panic(new ValueError.ptr("reflect.Value.NumMethod", 0));
 		}
-		if (!((((v.flag & 8) >>> 0) === 0))) {
+		if (!((((v.flag & 256) >>> 0) === 0))) {
 			return 0;
 		}
 		return v.typ.NumMethod();
 	};
 	Value.prototype.NumMethod = function() { return this.$val.NumMethod(); };
-	Value.Ptr.prototype.MethodByName = function(name) {
-		var v, _tuple, m, ok;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		if (v.typ === ($ptrType(rtype)).nil) {
-			$panic(new ValueError.Ptr("reflect.Value.MethodByName", 0));
+	Value.ptr.prototype.MethodByName = function(name) {
+		var _tuple, m, ok, v;
+		v = this;
+		if (v.typ === ptrType$1.nil) {
+			$panic(new ValueError.ptr("reflect.Value.MethodByName", 0));
 		}
-		if (!((((v.flag & 8) >>> 0) === 0))) {
-			return new Value.Ptr(($ptrType(rtype)).nil, 0, 0, 0);
+		if (!((((v.flag & 256) >>> 0) === 0))) {
+			return new Value.ptr(ptrType$1.nil, 0, 0);
 		}
-		_tuple = v.typ.MethodByName(name); m = new Method.Ptr(); $copy(m, _tuple[0], Method); ok = _tuple[1];
+		_tuple = v.typ.MethodByName(name); m = $clone(_tuple[0], Method); ok = _tuple[1];
 		if (!ok) {
-			return new Value.Ptr(($ptrType(rtype)).nil, 0, 0, 0);
+			return new Value.ptr(ptrType$1.nil, 0, 0);
 		}
 		return v.Method(m.Index);
 	};
 	Value.prototype.MethodByName = function(name) { return this.$val.MethodByName(name); };
-	Value.Ptr.prototype.NumField = function() {
-		var v, tt;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(25);
-		tt = v.typ.structType;
+	Value.ptr.prototype.NumField = function() {
+		var tt, v;
+		v = this;
+		new flag(v.flag).mustBe(25);
+		tt = v.typ.kindType;
 		return tt.fields.$length;
 	};
 	Value.prototype.NumField = function() { return this.$val.NumField(); };
-	Value.Ptr.prototype.OverflowComplex = function(x) {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.OverflowComplex = function(x) {
+		var _ref, k, v;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 15) {
 			return overflowFloat32(x.$real) || overflowFloat32(x.$imag);
 		} else if (_ref === 16) {
 			return false;
 		}
-		$panic(new ValueError.Ptr("reflect.Value.OverflowComplex", k));
+		$panic(new ValueError.ptr("reflect.Value.OverflowComplex", new flag(v.flag).kind()));
 	};
 	Value.prototype.OverflowComplex = function(x) { return this.$val.OverflowComplex(x); };
-	Value.Ptr.prototype.OverflowFloat = function(x) {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.OverflowFloat = function(x) {
+		var _ref, k, v;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 13) {
 			return overflowFloat32(x);
 		} else if (_ref === 14) {
 			return false;
 		}
-		$panic(new ValueError.Ptr("reflect.Value.OverflowFloat", k));
+		$panic(new ValueError.ptr("reflect.Value.OverflowFloat", new flag(v.flag).kind()));
 	};
 	Value.prototype.OverflowFloat = function(x) { return this.$val.OverflowFloat(x); };
 	overflowFloat32 = function(x) {
@@ -5805,97 +6127,97 @@ $packages["reflect"] = (function() {
 		}
 		return 3.4028234663852886e+38 < x && x <= 1.7976931348623157e+308;
 	};
-	Value.Ptr.prototype.OverflowInt = function(x) {
-		var v, k, _ref, x$1, bitSize, trunc;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.OverflowInt = function(x) {
+		var _ref, bitSize, k, trunc, v, x$1;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 2 || _ref === 3 || _ref === 4 || _ref === 5 || _ref === 6) {
 			bitSize = (x$1 = v.typ.size, (((x$1 >>> 16 << 16) * 8 >>> 0) + (x$1 << 16 >>> 16) * 8) >>> 0);
 			trunc = $shiftRightInt64(($shiftLeft64(x, ((64 - bitSize >>> 0)))), ((64 - bitSize >>> 0)));
 			return !((x.$high === trunc.$high && x.$low === trunc.$low));
 		}
-		$panic(new ValueError.Ptr("reflect.Value.OverflowInt", k));
+		$panic(new ValueError.ptr("reflect.Value.OverflowInt", new flag(v.flag).kind()));
 	};
 	Value.prototype.OverflowInt = function(x) { return this.$val.OverflowInt(x); };
-	Value.Ptr.prototype.OverflowUint = function(x) {
-		var v, k, _ref, x$1, bitSize, trunc;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.OverflowUint = function(x) {
+		var _ref, bitSize, k, trunc, v, x$1;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 7 || _ref === 12 || _ref === 8 || _ref === 9 || _ref === 10 || _ref === 11) {
 			bitSize = (x$1 = v.typ.size, (((x$1 >>> 16 << 16) * 8 >>> 0) + (x$1 << 16 >>> 16) * 8) >>> 0);
 			trunc = $shiftRightUint64(($shiftLeft64(x, ((64 - bitSize >>> 0)))), ((64 - bitSize >>> 0)));
 			return !((x.$high === trunc.$high && x.$low === trunc.$low));
 		}
-		$panic(new ValueError.Ptr("reflect.Value.OverflowUint", k));
+		$panic(new ValueError.ptr("reflect.Value.OverflowUint", new flag(v.flag).kind()));
 	};
 	Value.prototype.OverflowUint = function(x) { return this.$val.OverflowUint(x); };
-	Value.Ptr.prototype.SetBool = function(x) {
+	Value.ptr.prototype.SetBool = function(x) {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		(new flag(v.flag)).mustBe(1);
+		v = this;
+		new flag(v.flag).mustBeAssignable();
+		new flag(v.flag).mustBe(1);
 		v.ptr.$set(x);
 	};
 	Value.prototype.SetBool = function(x) { return this.$val.SetBool(x); };
-	Value.Ptr.prototype.SetBytes = function(x) {
+	Value.ptr.prototype.SetBytes = function(x) {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		(new flag(v.flag)).mustBe(23);
+		v = this;
+		new flag(v.flag).mustBeAssignable();
+		new flag(v.flag).mustBe(23);
 		if (!((v.typ.Elem().Kind() === 8))) {
 			$panic(new $String("reflect.Value.SetBytes of non-byte slice"));
 		}
 		v.ptr.$set(x);
 	};
 	Value.prototype.SetBytes = function(x) { return this.$val.SetBytes(x); };
-	Value.Ptr.prototype.setRunes = function(x) {
+	Value.ptr.prototype.setRunes = function(x) {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		(new flag(v.flag)).mustBe(23);
+		v = this;
+		new flag(v.flag).mustBeAssignable();
+		new flag(v.flag).mustBe(23);
 		if (!((v.typ.Elem().Kind() === 5))) {
 			$panic(new $String("reflect.Value.setRunes of non-rune slice"));
 		}
 		v.ptr.$set(x);
 	};
 	Value.prototype.setRunes = function(x) { return this.$val.setRunes(x); };
-	Value.Ptr.prototype.SetComplex = function(x) {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.SetComplex = function(x) {
+		var _ref, k, v;
+		v = this;
+		new flag(v.flag).mustBeAssignable();
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 15) {
 			v.ptr.$set(new $Complex64(x.$real, x.$imag));
 		} else if (_ref === 16) {
 			v.ptr.$set(x);
 		} else {
-			$panic(new ValueError.Ptr("reflect.Value.SetComplex", k));
+			$panic(new ValueError.ptr("reflect.Value.SetComplex", new flag(v.flag).kind()));
 		}
 	};
 	Value.prototype.SetComplex = function(x) { return this.$val.SetComplex(x); };
-	Value.Ptr.prototype.SetFloat = function(x) {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.SetFloat = function(x) {
+		var _ref, k, v;
+		v = this;
+		new flag(v.flag).mustBeAssignable();
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 13) {
 			v.ptr.$set(x);
 		} else if (_ref === 14) {
 			v.ptr.$set(x);
 		} else {
-			$panic(new ValueError.Ptr("reflect.Value.SetFloat", k));
+			$panic(new ValueError.ptr("reflect.Value.SetFloat", new flag(v.flag).kind()));
 		}
 	};
 	Value.prototype.SetFloat = function(x) { return this.$val.SetFloat(x); };
-	Value.Ptr.prototype.SetInt = function(x) {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.SetInt = function(x) {
+		var _ref, k, v;
+		v = this;
+		new flag(v.flag).mustBeAssignable();
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 2) {
 			v.ptr.$set(((x.$low + ((x.$high >> 31) * 4294967296)) >> 0));
@@ -5908,48 +6230,46 @@ $packages["reflect"] = (function() {
 		} else if (_ref === 6) {
 			v.ptr.$set(x);
 		} else {
-			$panic(new ValueError.Ptr("reflect.Value.SetInt", k));
+			$panic(new ValueError.ptr("reflect.Value.SetInt", new flag(v.flag).kind()));
 		}
 	};
 	Value.prototype.SetInt = function(x) { return this.$val.SetInt(x); };
-	Value.Ptr.prototype.SetMapIndex = function(key, val) {
-		var v, tt, k, e;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBe(21);
-		(new flag(v.flag)).mustBeExported();
-		(new flag(key.flag)).mustBeExported();
-		tt = v.typ.mapType;
-		$copy(key, key.assignTo("reflect.Value.SetMapIndex", tt.key, ($ptrType($emptyInterface)).nil), Value);
+	Value.ptr.prototype.SetMapIndex = function(key, val) {
+		var e, k, tt, v;
+		v = this;
+		val = val;
+		key = key;
+		new flag(v.flag).mustBe(21);
+		new flag(v.flag).mustBeExported();
+		new flag(key.flag).mustBeExported();
+		tt = v.typ.kindType;
+		key = key.assignTo("reflect.Value.SetMapIndex", tt.key, 0);
 		k = 0;
-		if (!((((key.flag & 2) >>> 0) === 0))) {
+		if (!((((key.flag & 64) >>> 0) === 0))) {
 			k = key.ptr;
-		} else if (key.typ.pointers()) {
-			k = new ($ptrType($UnsafePointer))(function() { return this.$target.ptr; }, function($v) { this.$target.ptr = $v; }, key);
 		} else {
-			k = new ($ptrType($Uintptr))(function() { return this.$target.scalar; }, function($v) { this.$target.scalar = $v; }, key);
+			k = new ptrType$17(function() { return this.$target.ptr; }, function($v) { this.$target.ptr = $v; }, key);
 		}
-		if (val.typ === ($ptrType(rtype)).nil) {
+		if (val.typ === ptrType$1.nil) {
 			mapdelete(v.typ, v.pointer(), k);
 			return;
 		}
-		(new flag(val.flag)).mustBeExported();
-		$copy(val, val.assignTo("reflect.Value.SetMapIndex", tt.elem, ($ptrType($emptyInterface)).nil), Value);
+		new flag(val.flag).mustBeExported();
+		val = val.assignTo("reflect.Value.SetMapIndex", tt.elem, 0);
 		e = 0;
-		if (!((((val.flag & 2) >>> 0) === 0))) {
+		if (!((((val.flag & 64) >>> 0) === 0))) {
 			e = val.ptr;
-		} else if (val.typ.pointers()) {
-			e = new ($ptrType($UnsafePointer))(function() { return this.$target.ptr; }, function($v) { this.$target.ptr = $v; }, val);
 		} else {
-			e = new ($ptrType($Uintptr))(function() { return this.$target.scalar; }, function($v) { this.$target.scalar = $v; }, val);
+			e = new ptrType$17(function() { return this.$target.ptr; }, function($v) { this.$target.ptr = $v; }, val);
 		}
 		mapassign(v.typ, v.pointer(), k, e);
 	};
 	Value.prototype.SetMapIndex = function(key, val) { return this.$val.SetMapIndex(key, val); };
-	Value.Ptr.prototype.SetUint = function(x) {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.SetUint = function(x) {
+		var _ref, k, v;
+		v = this;
+		new flag(v.flag).mustBeAssignable();
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 7) {
 			v.ptr.$set((x.$low >>> 0));
@@ -5964,76 +6284,71 @@ $packages["reflect"] = (function() {
 		} else if (_ref === 12) {
 			v.ptr.$set((x.$low >>> 0));
 		} else {
-			$panic(new ValueError.Ptr("reflect.Value.SetUint", k));
+			$panic(new ValueError.ptr("reflect.Value.SetUint", new flag(v.flag).kind()));
 		}
 	};
 	Value.prototype.SetUint = function(x) { return this.$val.SetUint(x); };
-	Value.Ptr.prototype.SetPointer = function(x) {
+	Value.ptr.prototype.SetPointer = function(x) {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		(new flag(v.flag)).mustBe(26);
+		v = this;
+		new flag(v.flag).mustBeAssignable();
+		new flag(v.flag).mustBe(26);
 		v.ptr.$set(x);
 	};
 	Value.prototype.SetPointer = function(x) { return this.$val.SetPointer(x); };
-	Value.Ptr.prototype.SetString = function(x) {
+	Value.ptr.prototype.SetString = function(x) {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		(new flag(v.flag)).mustBeAssignable();
-		(new flag(v.flag)).mustBe(24);
+		v = this;
+		new flag(v.flag).mustBeAssignable();
+		new flag(v.flag).mustBe(24);
 		v.ptr.$set(x);
 	};
 	Value.prototype.SetString = function(x) { return this.$val.SetString(x); };
-	Value.Ptr.prototype.String = function() {
-		var v, k, _ref;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
+	Value.ptr.prototype.String = function() {
+		var _ref, k, v;
+		v = this;
+		k = new flag(v.flag).kind();
 		_ref = k;
 		if (_ref === 0) {
 			return "<invalid Value>";
 		} else if (_ref === 24) {
 			return v.ptr.$get();
 		}
-		return "<" + v.typ.String() + " Value>";
+		return "<" + v.Type().String() + " Value>";
 	};
 	Value.prototype.String = function() { return this.$val.String(); };
-	Value.Ptr.prototype.Type = function() {
-		var v, f, i, tt, x, m, ut, x$1, m$1;
-		v = new Value.Ptr(); $copy(v, this, Value);
+	Value.ptr.prototype.Type = function() {
+		var f, i, m, m$1, tt, ut, v, x, x$1;
+		v = this;
 		f = v.flag;
 		if (f === 0) {
-			$panic(new ValueError.Ptr("reflect.Value.Type", 0));
+			$panic(new ValueError.ptr("reflect.Value.Type", 0));
 		}
-		if (((f & 8) >>> 0) === 0) {
+		if (((f & 256) >>> 0) === 0) {
 			return v.typ;
 		}
 		i = (v.flag >> 0) >> 9 >> 0;
 		if (v.typ.Kind() === 20) {
-			tt = v.typ.interfaceType;
-			if (i < 0 || i >= tt.methods.$length) {
+			tt = v.typ.kindType;
+			if ((i >>> 0) >= (tt.methods.$length >>> 0)) {
 				$panic(new $String("reflect: internal error: invalid method index"));
 			}
 			m = (x = tt.methods, ((i < 0 || i >= x.$length) ? $throwRuntimeError("index out of range") : x.$array[x.$offset + i]));
 			return m.typ;
 		}
 		ut = v.typ.uncommonType.uncommon();
-		if (ut === ($ptrType(uncommonType)).nil || i < 0 || i >= ut.methods.$length) {
+		if (ut === ptrType$5.nil || (i >>> 0) >= (ut.methods.$length >>> 0)) {
 			$panic(new $String("reflect: internal error: invalid method index"));
 		}
 		m$1 = (x$1 = ut.methods, ((i < 0 || i >= x$1.$length) ? $throwRuntimeError("index out of range") : x$1.$array[x$1.$offset + i]));
 		return m$1.mtyp;
 	};
 	Value.prototype.Type = function() { return this.$val.Type(); };
-	Value.Ptr.prototype.Uint = function() {
-		var v, k, p, _ref, x;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		k = (new flag(v.flag)).kind();
-		p = 0;
-		if (!((((v.flag & 2) >>> 0) === 0))) {
-			p = v.ptr;
-		} else {
-			p = new ($ptrType($Uintptr))(function() { return this.$target.scalar; }, function($v) { this.$target.scalar = $v; }, v);
-		}
+	Value.ptr.prototype.Uint = function() {
+		var _ref, k, p, v, x;
+		v = this;
+		k = new flag(v.flag).kind();
+		p = v.ptr;
 		_ref = k;
 		if (_ref === 7) {
 			return new $Uint64(0, p.$get());
@@ -6048,67 +6363,67 @@ $packages["reflect"] = (function() {
 		} else if (_ref === 12) {
 			return (x = p.$get(), new $Uint64(0, x.constructor === Number ? x : 1));
 		}
-		$panic(new ValueError.Ptr("reflect.Value.Uint", k));
+		$panic(new ValueError.ptr("reflect.Value.Uint", new flag(v.flag).kind()));
 	};
 	Value.prototype.Uint = function() { return this.$val.Uint(); };
-	Value.Ptr.prototype.UnsafeAddr = function() {
+	Value.ptr.prototype.UnsafeAddr = function() {
 		var v;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		if (v.typ === ($ptrType(rtype)).nil) {
-			$panic(new ValueError.Ptr("reflect.Value.UnsafeAddr", 0));
+		v = this;
+		if (v.typ === ptrType$1.nil) {
+			$panic(new ValueError.ptr("reflect.Value.UnsafeAddr", 0));
 		}
-		if (((v.flag & 4) >>> 0) === 0) {
+		if (((v.flag & 128) >>> 0) === 0) {
 			$panic(new $String("reflect.Value.UnsafeAddr of unaddressable value"));
 		}
 		return v.ptr;
 	};
 	Value.prototype.UnsafeAddr = function() { return this.$val.UnsafeAddr(); };
 	New = $pkg.New = function(typ) {
-		var ptr, fl;
+		var fl, ptr;
 		if ($interfaceIsEqual(typ, $ifaceNil)) {
 			$panic(new $String("reflect: New(nil)"));
 		}
-		ptr = unsafe_New($assertType(typ, ($ptrType(rtype))));
-		fl = 352;
-		return new Value.Ptr(typ.common().ptrTo(), ptr, 0, fl);
+		ptr = unsafe_New($assertType(typ, ptrType$1));
+		fl = 22;
+		return new Value.ptr(typ.common().ptrTo(), ptr, fl);
 	};
-	Value.Ptr.prototype.assignTo = function(context, dst, target) {
-		var v, fl, x;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		if (!((((v.flag & 8) >>> 0) === 0))) {
-			$copy(v, makeMethodValue(context, $clone(v, Value)), Value);
+	Value.ptr.prototype.assignTo = function(context, dst, target) {
+		var fl, v, x;
+		v = this;
+		if (!((((v.flag & 256) >>> 0) === 0))) {
+			v = makeMethodValue(context, v);
 		}
 		if (directlyAssignable(dst, v.typ)) {
 			v.typ = dst;
-			fl = (v.flag & 7) >>> 0;
-			fl = (fl | (((dst.Kind() >>> 0) << 4 >>> 0))) >>> 0;
-			return new Value.Ptr(dst, v.ptr, v.scalar, fl);
+			fl = (v.flag & 224) >>> 0;
+			fl = (fl | ((dst.Kind() >>> 0))) >>> 0;
+			return new Value.ptr(dst, v.ptr, fl);
 		} else if (implements$1(dst, v.typ)) {
-			if (target === ($ptrType($emptyInterface)).nil) {
-				target = $newDataPointer($ifaceNil, ($ptrType($emptyInterface)));
+			if (target === 0) {
+				target = unsafe_New(dst);
 			}
-			x = valueInterface($clone(v, Value), false);
+			x = valueInterface(v, false);
 			if (dst.NumMethod() === 0) {
 				target.$set(x);
 			} else {
 				ifaceE2I(dst, x, target);
 			}
-			return new Value.Ptr(dst, target, 0, 322);
+			return new Value.ptr(dst, target, 84);
 		}
 		$panic(new $String(context + ": value of type " + v.typ.String() + " is not assignable to type " + dst.String()));
 	};
 	Value.prototype.assignTo = function(context, dst, target) { return this.$val.assignTo(context, dst, target); };
-	Value.Ptr.prototype.Convert = function(t) {
-		var v, op;
-		v = new Value.Ptr(); $copy(v, this, Value);
-		if (!((((v.flag & 8) >>> 0) === 0))) {
-			$copy(v, makeMethodValue("Convert", $clone(v, Value)), Value);
+	Value.ptr.prototype.Convert = function(t) {
+		var op, v;
+		v = this;
+		if (!((((v.flag & 256) >>> 0) === 0))) {
+			v = makeMethodValue("Convert", v);
 		}
 		op = convertOp(t.common(), v.typ);
 		if (op === $throwNilPointerError) {
 			$panic(new $String("reflect.Value.Convert: value of type " + v.typ.String() + " cannot be converted to type " + t.String()));
 		}
-		return op($clone(v, Value), t);
+		return op(v, t);
 	};
 	Value.prototype.Convert = function(t) { return this.$val.Convert(t); };
 	convertOp = function(dst, src) {
@@ -6180,233 +6495,257 @@ $packages["reflect"] = (function() {
 		return $throwNilPointerError;
 	};
 	makeFloat = function(f, v, t) {
-		var typ, ptr, s, _ref;
+		var _ref, ptr, typ;
 		typ = t.common();
-		if (typ.size > 4) {
-			ptr = unsafe_New(typ);
-			ptr.$set(v);
-			return new Value.Ptr(typ, ptr, 0, (((f | 2) >>> 0) | ((typ.Kind() >>> 0) << 4 >>> 0)) >>> 0);
-		}
-		s = 0;
+		ptr = unsafe_New(typ);
 		_ref = typ.size;
 		if (_ref === 4) {
-			new ($ptrType($Uintptr))(function() { return s; }, function($v) { s = $v; }).$set(v);
+			ptr.$set(v);
 		} else if (_ref === 8) {
-			new ($ptrType($Uintptr))(function() { return s; }, function($v) { s = $v; }).$set(v);
+			ptr.$set(v);
 		}
-		return new Value.Ptr(typ, 0, s, (f | ((typ.Kind() >>> 0) << 4 >>> 0)) >>> 0);
+		return new Value.ptr(typ, ptr, (((f | 64) >>> 0) | (typ.Kind() >>> 0)) >>> 0);
 	};
 	makeComplex = function(f, v, t) {
-		var typ, ptr, _ref, s;
+		var _ref, ptr, typ;
 		typ = t.common();
-		if (typ.size > 4) {
-			ptr = unsafe_New(typ);
-			_ref = typ.size;
-			if (_ref === 8) {
-				ptr.$set(new $Complex64(v.$real, v.$imag));
-			} else if (_ref === 16) {
-				ptr.$set(v);
-			}
-			return new Value.Ptr(typ, ptr, 0, (((f | 2) >>> 0) | ((typ.Kind() >>> 0) << 4 >>> 0)) >>> 0);
+		ptr = unsafe_New(typ);
+		_ref = typ.size;
+		if (_ref === 8) {
+			ptr.$set(new $Complex64(v.$real, v.$imag));
+		} else if (_ref === 16) {
+			ptr.$set(v);
 		}
-		s = 0;
-		new ($ptrType($Uintptr))(function() { return s; }, function($v) { s = $v; }).$set(new $Complex64(v.$real, v.$imag));
-		return new Value.Ptr(typ, 0, s, (f | ((typ.Kind() >>> 0) << 4 >>> 0)) >>> 0);
+		return new Value.ptr(typ, ptr, (((f | 64) >>> 0) | (typ.Kind() >>> 0)) >>> 0);
 	};
 	makeString = function(f, v, t) {
 		var ret;
-		ret = new Value.Ptr(); $copy(ret, New(t).Elem(), Value);
+		ret = New(t).Elem();
 		ret.SetString(v);
-		ret.flag = ((ret.flag & ~4) | f) >>> 0;
+		ret.flag = ((ret.flag & ~128) | f) >>> 0;
 		return ret;
 	};
 	makeBytes = function(f, v, t) {
 		var ret;
-		ret = new Value.Ptr(); $copy(ret, New(t).Elem(), Value);
+		ret = New(t).Elem();
 		ret.SetBytes(v);
-		ret.flag = ((ret.flag & ~4) | f) >>> 0;
+		ret.flag = ((ret.flag & ~128) | f) >>> 0;
 		return ret;
 	};
 	makeRunes = function(f, v, t) {
 		var ret;
-		ret = new Value.Ptr(); $copy(ret, New(t).Elem(), Value);
+		ret = New(t).Elem();
 		ret.setRunes(v);
-		ret.flag = ((ret.flag & ~4) | f) >>> 0;
+		ret.flag = ((ret.flag & ~128) | f) >>> 0;
 		return ret;
 	};
 	cvtInt = function(v, t) {
 		var x;
-		return makeInt((v.flag & 1) >>> 0, (x = v.Int(), new $Uint64(x.$high, x.$low)), t);
+		v = v;
+		return makeInt((v.flag & 32) >>> 0, (x = v.Int(), new $Uint64(x.$high, x.$low)), t);
 	};
 	cvtUint = function(v, t) {
-		return makeInt((v.flag & 1) >>> 0, v.Uint(), t);
+		v = v;
+		return makeInt((v.flag & 32) >>> 0, v.Uint(), t);
 	};
 	cvtFloatInt = function(v, t) {
 		var x;
-		return makeInt((v.flag & 1) >>> 0, (x = new $Int64(0, v.Float()), new $Uint64(x.$high, x.$low)), t);
+		v = v;
+		return makeInt((v.flag & 32) >>> 0, (x = new $Int64(0, v.Float()), new $Uint64(x.$high, x.$low)), t);
 	};
 	cvtFloatUint = function(v, t) {
-		return makeInt((v.flag & 1) >>> 0, new $Uint64(0, v.Float()), t);
+		v = v;
+		return makeInt((v.flag & 32) >>> 0, new $Uint64(0, v.Float()), t);
 	};
 	cvtIntFloat = function(v, t) {
-		return makeFloat((v.flag & 1) >>> 0, $flatten64(v.Int()), t);
+		v = v;
+		return makeFloat((v.flag & 32) >>> 0, $flatten64(v.Int()), t);
 	};
 	cvtUintFloat = function(v, t) {
-		return makeFloat((v.flag & 1) >>> 0, $flatten64(v.Uint()), t);
+		v = v;
+		return makeFloat((v.flag & 32) >>> 0, $flatten64(v.Uint()), t);
 	};
 	cvtFloat = function(v, t) {
-		return makeFloat((v.flag & 1) >>> 0, v.Float(), t);
+		v = v;
+		return makeFloat((v.flag & 32) >>> 0, v.Float(), t);
 	};
 	cvtComplex = function(v, t) {
-		return makeComplex((v.flag & 1) >>> 0, v.Complex(), t);
+		v = v;
+		return makeComplex((v.flag & 32) >>> 0, v.Complex(), t);
 	};
 	cvtIntString = function(v, t) {
-		return makeString((v.flag & 1) >>> 0, $encodeRune(v.Int().$low), t);
+		v = v;
+		return makeString((v.flag & 32) >>> 0, $encodeRune(v.Int().$low), t);
 	};
 	cvtUintString = function(v, t) {
-		return makeString((v.flag & 1) >>> 0, $encodeRune(v.Uint().$low), t);
+		v = v;
+		return makeString((v.flag & 32) >>> 0, $encodeRune(v.Uint().$low), t);
 	};
 	cvtBytesString = function(v, t) {
-		return makeString((v.flag & 1) >>> 0, $bytesToString(v.Bytes()), t);
+		v = v;
+		return makeString((v.flag & 32) >>> 0, $bytesToString(v.Bytes()), t);
 	};
 	cvtStringBytes = function(v, t) {
-		return makeBytes((v.flag & 1) >>> 0, new ($sliceType($Uint8))($stringToBytes(v.String())), t);
+		v = v;
+		return makeBytes((v.flag & 32) >>> 0, new sliceType$12($stringToBytes(v.String())), t);
 	};
 	cvtRunesString = function(v, t) {
-		return makeString((v.flag & 1) >>> 0, $runesToString(v.runes()), t);
+		v = v;
+		return makeString((v.flag & 32) >>> 0, $runesToString(v.runes()), t);
 	};
 	cvtStringRunes = function(v, t) {
-		return makeRunes((v.flag & 1) >>> 0, new ($sliceType($Int32))($stringToRunes(v.String())), t);
+		v = v;
+		return makeRunes((v.flag & 32) >>> 0, new sliceType$13($stringToRunes(v.String())), t);
 	};
 	cvtT2I = function(v, typ) {
 		var target, x;
-		target = $newDataPointer($ifaceNil, ($ptrType($emptyInterface)));
-		x = valueInterface($clone(v, Value), false);
+		v = v;
+		target = unsafe_New(typ.common());
+		x = valueInterface(v, false);
 		if (typ.NumMethod() === 0) {
 			target.$set(x);
 		} else {
-			ifaceE2I($assertType(typ, ($ptrType(rtype))), x, target);
+			ifaceE2I($assertType(typ, ptrType$1), x, target);
 		}
-		return new Value.Ptr(typ.common(), target, 0, (((((v.flag & 1) >>> 0) | 2) >>> 0) | 320) >>> 0);
+		return new Value.ptr(typ.common(), target, (((((v.flag & 32) >>> 0) | 64) >>> 0) | 20) >>> 0);
 	};
 	cvtI2I = function(v, typ) {
 		var ret;
+		v = v;
 		if (v.IsNil()) {
-			ret = new Value.Ptr(); $copy(ret, Zero(typ), Value);
-			ret.flag = (ret.flag | (((v.flag & 1) >>> 0))) >>> 0;
+			ret = Zero(typ);
+			ret.flag = (ret.flag | (((v.flag & 32) >>> 0))) >>> 0;
 			return ret;
 		}
-		return cvtT2I($clone(v.Elem(), Value), typ);
+		return cvtT2I(v.Elem(), typ);
 	};
-	call = function() {
-		$panic("Native function not implemented: reflect.call");
-	};
+	Kind.methods = [{prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}];
+	ptrType$19.methods = [{prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}];
+	rtype.methods = [{prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ptrType$1.methods = [{prop: "Align", name: "Align", pkg: "", type: $funcType([], [$Int], false)}, {prop: "AssignableTo", name: "AssignableTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Bits", name: "Bits", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ChanDir", name: "ChanDir", pkg: "", type: $funcType([], [ChanDir], false)}, {prop: "Comparable", name: "Comparable", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "ConvertibleTo", name: "ConvertibleTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Type], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [StructField], false)}, {prop: "FieldAlign", name: "FieldAlign", pkg: "", type: $funcType([], [$Int], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [StructField], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [StructField, $Bool], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [StructField, $Bool], false)}, {prop: "Implements", name: "Implements", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "In", name: "In", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "IsVariadic", name: "IsVariadic", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Key", name: "Key", pkg: "", type: $funcType([], [Type], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Method], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Method, $Bool], false)}, {prop: "Name", name: "Name", pkg: "", type: $funcType([], [$String], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumIn", name: "NumIn", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumOut", name: "NumOut", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Out", name: "Out", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $funcType([], [$String], false)}, {prop: "Size", name: "Size", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "common", name: "common", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "pointers", name: "pointers", pkg: "reflect", type: $funcType([], [$Bool], false)}, {prop: "ptrTo", name: "ptrTo", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ptrType$5.methods = [{prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Method], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Method, $Bool], false)}, {prop: "Name", name: "Name", pkg: "", type: $funcType([], [$String], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $funcType([], [$String], false)}, {prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ChanDir.methods = [{prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}];
+	ptrType$20.methods = [{prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}];
+	arrayType.methods = [{prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ptrType$21.methods = [{prop: "Align", name: "Align", pkg: "", type: $funcType([], [$Int], false)}, {prop: "AssignableTo", name: "AssignableTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Bits", name: "Bits", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ChanDir", name: "ChanDir", pkg: "", type: $funcType([], [ChanDir], false)}, {prop: "Comparable", name: "Comparable", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "ConvertibleTo", name: "ConvertibleTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Type], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [StructField], false)}, {prop: "FieldAlign", name: "FieldAlign", pkg: "", type: $funcType([], [$Int], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [StructField], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [StructField, $Bool], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [StructField, $Bool], false)}, {prop: "Implements", name: "Implements", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "In", name: "In", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "IsVariadic", name: "IsVariadic", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Key", name: "Key", pkg: "", type: $funcType([], [Type], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Method], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Method, $Bool], false)}, {prop: "Name", name: "Name", pkg: "", type: $funcType([], [$String], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumIn", name: "NumIn", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumOut", name: "NumOut", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Out", name: "Out", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $funcType([], [$String], false)}, {prop: "Size", name: "Size", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "common", name: "common", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "pointers", name: "pointers", pkg: "reflect", type: $funcType([], [$Bool], false)}, {prop: "ptrTo", name: "ptrTo", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	chanType.methods = [{prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ptrType$22.methods = [{prop: "Align", name: "Align", pkg: "", type: $funcType([], [$Int], false)}, {prop: "AssignableTo", name: "AssignableTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Bits", name: "Bits", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ChanDir", name: "ChanDir", pkg: "", type: $funcType([], [ChanDir], false)}, {prop: "Comparable", name: "Comparable", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "ConvertibleTo", name: "ConvertibleTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Type], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [StructField], false)}, {prop: "FieldAlign", name: "FieldAlign", pkg: "", type: $funcType([], [$Int], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [StructField], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [StructField, $Bool], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [StructField, $Bool], false)}, {prop: "Implements", name: "Implements", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "In", name: "In", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "IsVariadic", name: "IsVariadic", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Key", name: "Key", pkg: "", type: $funcType([], [Type], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Method], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Method, $Bool], false)}, {prop: "Name", name: "Name", pkg: "", type: $funcType([], [$String], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumIn", name: "NumIn", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumOut", name: "NumOut", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Out", name: "Out", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $funcType([], [$String], false)}, {prop: "Size", name: "Size", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "common", name: "common", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "pointers", name: "pointers", pkg: "reflect", type: $funcType([], [$Bool], false)}, {prop: "ptrTo", name: "ptrTo", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	funcType.methods = [{prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ptrType$18.methods = [{prop: "Align", name: "Align", pkg: "", type: $funcType([], [$Int], false)}, {prop: "AssignableTo", name: "AssignableTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Bits", name: "Bits", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ChanDir", name: "ChanDir", pkg: "", type: $funcType([], [ChanDir], false)}, {prop: "Comparable", name: "Comparable", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "ConvertibleTo", name: "ConvertibleTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Type], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [StructField], false)}, {prop: "FieldAlign", name: "FieldAlign", pkg: "", type: $funcType([], [$Int], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [StructField], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [StructField, $Bool], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [StructField, $Bool], false)}, {prop: "Implements", name: "Implements", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "In", name: "In", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "IsVariadic", name: "IsVariadic", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Key", name: "Key", pkg: "", type: $funcType([], [Type], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Method], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Method, $Bool], false)}, {prop: "Name", name: "Name", pkg: "", type: $funcType([], [$String], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumIn", name: "NumIn", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumOut", name: "NumOut", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Out", name: "Out", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $funcType([], [$String], false)}, {prop: "Size", name: "Size", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "common", name: "common", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "pointers", name: "pointers", pkg: "reflect", type: $funcType([], [$Bool], false)}, {prop: "ptrTo", name: "ptrTo", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	interfaceType.methods = [{prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ptrType$10.methods = [{prop: "Align", name: "Align", pkg: "", type: $funcType([], [$Int], false)}, {prop: "AssignableTo", name: "AssignableTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Bits", name: "Bits", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ChanDir", name: "ChanDir", pkg: "", type: $funcType([], [ChanDir], false)}, {prop: "Comparable", name: "Comparable", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "ConvertibleTo", name: "ConvertibleTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Type], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [StructField], false)}, {prop: "FieldAlign", name: "FieldAlign", pkg: "", type: $funcType([], [$Int], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [StructField], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [StructField, $Bool], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [StructField, $Bool], false)}, {prop: "Implements", name: "Implements", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "In", name: "In", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "IsVariadic", name: "IsVariadic", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Key", name: "Key", pkg: "", type: $funcType([], [Type], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Method], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Method, $Bool], false)}, {prop: "Name", name: "Name", pkg: "", type: $funcType([], [$String], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumIn", name: "NumIn", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumOut", name: "NumOut", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Out", name: "Out", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $funcType([], [$String], false)}, {prop: "Size", name: "Size", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "common", name: "common", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "pointers", name: "pointers", pkg: "reflect", type: $funcType([], [$Bool], false)}, {prop: "ptrTo", name: "ptrTo", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	mapType.methods = [{prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ptrType$23.methods = [{prop: "Align", name: "Align", pkg: "", type: $funcType([], [$Int], false)}, {prop: "AssignableTo", name: "AssignableTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Bits", name: "Bits", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ChanDir", name: "ChanDir", pkg: "", type: $funcType([], [ChanDir], false)}, {prop: "Comparable", name: "Comparable", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "ConvertibleTo", name: "ConvertibleTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Type], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [StructField], false)}, {prop: "FieldAlign", name: "FieldAlign", pkg: "", type: $funcType([], [$Int], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [StructField], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [StructField, $Bool], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [StructField, $Bool], false)}, {prop: "Implements", name: "Implements", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "In", name: "In", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "IsVariadic", name: "IsVariadic", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Key", name: "Key", pkg: "", type: $funcType([], [Type], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Method], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Method, $Bool], false)}, {prop: "Name", name: "Name", pkg: "", type: $funcType([], [$String], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumIn", name: "NumIn", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumOut", name: "NumOut", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Out", name: "Out", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $funcType([], [$String], false)}, {prop: "Size", name: "Size", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "common", name: "common", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "pointers", name: "pointers", pkg: "reflect", type: $funcType([], [$Bool], false)}, {prop: "ptrTo", name: "ptrTo", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ptrType.methods = [{prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ptrType$2.methods = [{prop: "Align", name: "Align", pkg: "", type: $funcType([], [$Int], false)}, {prop: "AssignableTo", name: "AssignableTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Bits", name: "Bits", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ChanDir", name: "ChanDir", pkg: "", type: $funcType([], [ChanDir], false)}, {prop: "Comparable", name: "Comparable", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "ConvertibleTo", name: "ConvertibleTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Type], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [StructField], false)}, {prop: "FieldAlign", name: "FieldAlign", pkg: "", type: $funcType([], [$Int], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [StructField], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [StructField, $Bool], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [StructField, $Bool], false)}, {prop: "Implements", name: "Implements", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "In", name: "In", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "IsVariadic", name: "IsVariadic", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Key", name: "Key", pkg: "", type: $funcType([], [Type], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Method], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Method, $Bool], false)}, {prop: "Name", name: "Name", pkg: "", type: $funcType([], [$String], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumIn", name: "NumIn", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumOut", name: "NumOut", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Out", name: "Out", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $funcType([], [$String], false)}, {prop: "Size", name: "Size", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "common", name: "common", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "pointers", name: "pointers", pkg: "reflect", type: $funcType([], [$Bool], false)}, {prop: "ptrTo", name: "ptrTo", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	sliceType.methods = [{prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ptrType$24.methods = [{prop: "Align", name: "Align", pkg: "", type: $funcType([], [$Int], false)}, {prop: "AssignableTo", name: "AssignableTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Bits", name: "Bits", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ChanDir", name: "ChanDir", pkg: "", type: $funcType([], [ChanDir], false)}, {prop: "Comparable", name: "Comparable", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "ConvertibleTo", name: "ConvertibleTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Type], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [StructField], false)}, {prop: "FieldAlign", name: "FieldAlign", pkg: "", type: $funcType([], [$Int], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [StructField], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [StructField, $Bool], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [StructField, $Bool], false)}, {prop: "Implements", name: "Implements", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "In", name: "In", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "IsVariadic", name: "IsVariadic", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Key", name: "Key", pkg: "", type: $funcType([], [Type], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Method], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Method, $Bool], false)}, {prop: "Name", name: "Name", pkg: "", type: $funcType([], [$String], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumIn", name: "NumIn", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumOut", name: "NumOut", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Out", name: "Out", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $funcType([], [$String], false)}, {prop: "Size", name: "Size", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "common", name: "common", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "pointers", name: "pointers", pkg: "reflect", type: $funcType([], [$Bool], false)}, {prop: "ptrTo", name: "ptrTo", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	structType.methods = [{prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	ptrType$12.methods = [{prop: "Align", name: "Align", pkg: "", type: $funcType([], [$Int], false)}, {prop: "AssignableTo", name: "AssignableTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Bits", name: "Bits", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ChanDir", name: "ChanDir", pkg: "", type: $funcType([], [ChanDir], false)}, {prop: "Comparable", name: "Comparable", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "ConvertibleTo", name: "ConvertibleTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Type], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [StructField], false)}, {prop: "FieldAlign", name: "FieldAlign", pkg: "", type: $funcType([], [$Int], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [StructField], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [StructField, $Bool], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [StructField, $Bool], false)}, {prop: "Implements", name: "Implements", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "In", name: "In", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "IsVariadic", name: "IsVariadic", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Key", name: "Key", pkg: "", type: $funcType([], [Type], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Method], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Method, $Bool], false)}, {prop: "Name", name: "Name", pkg: "", type: $funcType([], [$String], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumIn", name: "NumIn", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumOut", name: "NumOut", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Out", name: "Out", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $funcType([], [$String], false)}, {prop: "Size", name: "Size", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "common", name: "common", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "pointers", name: "pointers", pkg: "reflect", type: $funcType([], [$Bool], false)}, {prop: "ptrTo", name: "ptrTo", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}];
+	StructTag.methods = [{prop: "Get", name: "Get", pkg: "", type: $funcType([$String], [$String], false)}];
+	ptrType$25.methods = [{prop: "Get", name: "Get", pkg: "", type: $funcType([$String], [$String], false)}];
+	Value.methods = [{prop: "Addr", name: "Addr", pkg: "", type: $funcType([], [Value], false)}, {prop: "Bool", name: "Bool", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Bytes", name: "Bytes", pkg: "", type: $funcType([], [sliceType$12], false)}, {prop: "Call", name: "Call", pkg: "", type: $funcType([sliceType$6], [sliceType$6], false)}, {prop: "CallSlice", name: "CallSlice", pkg: "", type: $funcType([sliceType$6], [sliceType$6], false)}, {prop: "CanAddr", name: "CanAddr", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "CanInterface", name: "CanInterface", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "CanSet", name: "CanSet", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Cap", name: "Cap", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Close", name: "Close", pkg: "", type: $funcType([], [], false)}, {prop: "Complex", name: "Complex", pkg: "", type: $funcType([], [$Complex128], false)}, {prop: "Convert", name: "Convert", pkg: "", type: $funcType([Type], [Value], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Value], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [Value], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [Value], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [Value], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [Value], false)}, {prop: "Float", name: "Float", pkg: "", type: $funcType([], [$Float64], false)}, {prop: "Index", name: "Index", pkg: "", type: $funcType([$Int], [Value], false)}, {prop: "Int", name: "Int", pkg: "", type: $funcType([], [$Int64], false)}, {prop: "Interface", name: "Interface", pkg: "", type: $funcType([], [$emptyInterface], false)}, {prop: "InterfaceData", name: "InterfaceData", pkg: "", type: $funcType([], [arrayType$3], false)}, {prop: "IsNil", name: "IsNil", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "IsValid", name: "IsValid", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "MapIndex", name: "MapIndex", pkg: "", type: $funcType([Value], [Value], false)}, {prop: "MapKeys", name: "MapKeys", pkg: "", type: $funcType([], [sliceType$6], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Value], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Value], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "OverflowComplex", name: "OverflowComplex", pkg: "", type: $funcType([$Complex128], [$Bool], false)}, {prop: "OverflowFloat", name: "OverflowFloat", pkg: "", type: $funcType([$Float64], [$Bool], false)}, {prop: "OverflowInt", name: "OverflowInt", pkg: "", type: $funcType([$Int64], [$Bool], false)}, {prop: "OverflowUint", name: "OverflowUint", pkg: "", type: $funcType([$Uint64], [$Bool], false)}, {prop: "Pointer", name: "Pointer", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "Recv", name: "Recv", pkg: "", type: $funcType([], [Value, $Bool], false)}, {prop: "Send", name: "Send", pkg: "", type: $funcType([Value], [], false)}, {prop: "Set", name: "Set", pkg: "", type: $funcType([Value], [], false)}, {prop: "SetBool", name: "SetBool", pkg: "", type: $funcType([$Bool], [], false)}, {prop: "SetBytes", name: "SetBytes", pkg: "", type: $funcType([sliceType$12], [], false)}, {prop: "SetCap", name: "SetCap", pkg: "", type: $funcType([$Int], [], false)}, {prop: "SetComplex", name: "SetComplex", pkg: "", type: $funcType([$Complex128], [], false)}, {prop: "SetFloat", name: "SetFloat", pkg: "", type: $funcType([$Float64], [], false)}, {prop: "SetInt", name: "SetInt", pkg: "", type: $funcType([$Int64], [], false)}, {prop: "SetLen", name: "SetLen", pkg: "", type: $funcType([$Int], [], false)}, {prop: "SetMapIndex", name: "SetMapIndex", pkg: "", type: $funcType([Value, Value], [], false)}, {prop: "SetPointer", name: "SetPointer", pkg: "", type: $funcType([$UnsafePointer], [], false)}, {prop: "SetString", name: "SetString", pkg: "", type: $funcType([$String], [], false)}, {prop: "SetUint", name: "SetUint", pkg: "", type: $funcType([$Uint64], [], false)}, {prop: "Slice", name: "Slice", pkg: "", type: $funcType([$Int, $Int], [Value], false)}, {prop: "Slice3", name: "Slice3", pkg: "", type: $funcType([$Int, $Int, $Int], [Value], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "TryRecv", name: "TryRecv", pkg: "", type: $funcType([], [Value, $Bool], false)}, {prop: "TrySend", name: "TrySend", pkg: "", type: $funcType([Value], [$Bool], false)}, {prop: "Type", name: "Type", pkg: "", type: $funcType([], [Type], false)}, {prop: "Uint", name: "Uint", pkg: "", type: $funcType([], [$Uint64], false)}, {prop: "UnsafeAddr", name: "UnsafeAddr", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "assignTo", name: "assignTo", pkg: "reflect", type: $funcType([$String, ptrType$1, $UnsafePointer], [Value], false)}, {prop: "call", name: "call", pkg: "reflect", type: $funcType([$String, sliceType$6], [sliceType$6], false)}, {prop: "kind", name: "kind", pkg: "reflect", type: $funcType([], [Kind], false)}, {prop: "mustBe", name: "mustBe", pkg: "reflect", type: $funcType([Kind], [], false)}, {prop: "mustBeAssignable", name: "mustBeAssignable", pkg: "reflect", type: $funcType([], [], false)}, {prop: "mustBeExported", name: "mustBeExported", pkg: "reflect", type: $funcType([], [], false)}, {prop: "object", name: "object", pkg: "reflect", type: $funcType([], [js.Object], false)}, {prop: "pointer", name: "pointer", pkg: "reflect", type: $funcType([], [$UnsafePointer], false)}, {prop: "recv", name: "recv", pkg: "reflect", type: $funcType([$Bool], [Value, $Bool], false)}, {prop: "runes", name: "runes", pkg: "reflect", type: $funcType([], [sliceType$13], false)}, {prop: "send", name: "send", pkg: "reflect", type: $funcType([Value, $Bool], [$Bool], false)}, {prop: "setRunes", name: "setRunes", pkg: "reflect", type: $funcType([sliceType$13], [], false)}];
+	ptrType$27.methods = [{prop: "Addr", name: "Addr", pkg: "", type: $funcType([], [Value], false)}, {prop: "Bool", name: "Bool", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Bytes", name: "Bytes", pkg: "", type: $funcType([], [sliceType$12], false)}, {prop: "Call", name: "Call", pkg: "", type: $funcType([sliceType$6], [sliceType$6], false)}, {prop: "CallSlice", name: "CallSlice", pkg: "", type: $funcType([sliceType$6], [sliceType$6], false)}, {prop: "CanAddr", name: "CanAddr", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "CanInterface", name: "CanInterface", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "CanSet", name: "CanSet", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Cap", name: "Cap", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Close", name: "Close", pkg: "", type: $funcType([], [], false)}, {prop: "Complex", name: "Complex", pkg: "", type: $funcType([], [$Complex128], false)}, {prop: "Convert", name: "Convert", pkg: "", type: $funcType([Type], [Value], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Value], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [Value], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [Value], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [Value], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [Value], false)}, {prop: "Float", name: "Float", pkg: "", type: $funcType([], [$Float64], false)}, {prop: "Index", name: "Index", pkg: "", type: $funcType([$Int], [Value], false)}, {prop: "Int", name: "Int", pkg: "", type: $funcType([], [$Int64], false)}, {prop: "Interface", name: "Interface", pkg: "", type: $funcType([], [$emptyInterface], false)}, {prop: "InterfaceData", name: "InterfaceData", pkg: "", type: $funcType([], [arrayType$3], false)}, {prop: "IsNil", name: "IsNil", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "IsValid", name: "IsValid", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "MapIndex", name: "MapIndex", pkg: "", type: $funcType([Value], [Value], false)}, {prop: "MapKeys", name: "MapKeys", pkg: "", type: $funcType([], [sliceType$6], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Value], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Value], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "OverflowComplex", name: "OverflowComplex", pkg: "", type: $funcType([$Complex128], [$Bool], false)}, {prop: "OverflowFloat", name: "OverflowFloat", pkg: "", type: $funcType([$Float64], [$Bool], false)}, {prop: "OverflowInt", name: "OverflowInt", pkg: "", type: $funcType([$Int64], [$Bool], false)}, {prop: "OverflowUint", name: "OverflowUint", pkg: "", type: $funcType([$Uint64], [$Bool], false)}, {prop: "Pointer", name: "Pointer", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "Recv", name: "Recv", pkg: "", type: $funcType([], [Value, $Bool], false)}, {prop: "Send", name: "Send", pkg: "", type: $funcType([Value], [], false)}, {prop: "Set", name: "Set", pkg: "", type: $funcType([Value], [], false)}, {prop: "SetBool", name: "SetBool", pkg: "", type: $funcType([$Bool], [], false)}, {prop: "SetBytes", name: "SetBytes", pkg: "", type: $funcType([sliceType$12], [], false)}, {prop: "SetCap", name: "SetCap", pkg: "", type: $funcType([$Int], [], false)}, {prop: "SetComplex", name: "SetComplex", pkg: "", type: $funcType([$Complex128], [], false)}, {prop: "SetFloat", name: "SetFloat", pkg: "", type: $funcType([$Float64], [], false)}, {prop: "SetInt", name: "SetInt", pkg: "", type: $funcType([$Int64], [], false)}, {prop: "SetLen", name: "SetLen", pkg: "", type: $funcType([$Int], [], false)}, {prop: "SetMapIndex", name: "SetMapIndex", pkg: "", type: $funcType([Value, Value], [], false)}, {prop: "SetPointer", name: "SetPointer", pkg: "", type: $funcType([$UnsafePointer], [], false)}, {prop: "SetString", name: "SetString", pkg: "", type: $funcType([$String], [], false)}, {prop: "SetUint", name: "SetUint", pkg: "", type: $funcType([$Uint64], [], false)}, {prop: "Slice", name: "Slice", pkg: "", type: $funcType([$Int, $Int], [Value], false)}, {prop: "Slice3", name: "Slice3", pkg: "", type: $funcType([$Int, $Int, $Int], [Value], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "TryRecv", name: "TryRecv", pkg: "", type: $funcType([], [Value, $Bool], false)}, {prop: "TrySend", name: "TrySend", pkg: "", type: $funcType([Value], [$Bool], false)}, {prop: "Type", name: "Type", pkg: "", type: $funcType([], [Type], false)}, {prop: "Uint", name: "Uint", pkg: "", type: $funcType([], [$Uint64], false)}, {prop: "UnsafeAddr", name: "UnsafeAddr", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "assignTo", name: "assignTo", pkg: "reflect", type: $funcType([$String, ptrType$1, $UnsafePointer], [Value], false)}, {prop: "call", name: "call", pkg: "reflect", type: $funcType([$String, sliceType$6], [sliceType$6], false)}, {prop: "kind", name: "kind", pkg: "reflect", type: $funcType([], [Kind], false)}, {prop: "mustBe", name: "mustBe", pkg: "reflect", type: $funcType([Kind], [], false)}, {prop: "mustBeAssignable", name: "mustBeAssignable", pkg: "reflect", type: $funcType([], [], false)}, {prop: "mustBeExported", name: "mustBeExported", pkg: "reflect", type: $funcType([], [], false)}, {prop: "object", name: "object", pkg: "reflect", type: $funcType([], [js.Object], false)}, {prop: "pointer", name: "pointer", pkg: "reflect", type: $funcType([], [$UnsafePointer], false)}, {prop: "recv", name: "recv", pkg: "reflect", type: $funcType([$Bool], [Value, $Bool], false)}, {prop: "runes", name: "runes", pkg: "reflect", type: $funcType([], [sliceType$13], false)}, {prop: "send", name: "send", pkg: "reflect", type: $funcType([Value, $Bool], [$Bool], false)}, {prop: "setRunes", name: "setRunes", pkg: "reflect", type: $funcType([sliceType$13], [], false)}];
+	flag.methods = [{prop: "kind", name: "kind", pkg: "reflect", type: $funcType([], [Kind], false)}, {prop: "mustBe", name: "mustBe", pkg: "reflect", type: $funcType([Kind], [], false)}, {prop: "mustBeAssignable", name: "mustBeAssignable", pkg: "reflect", type: $funcType([], [], false)}, {prop: "mustBeExported", name: "mustBeExported", pkg: "reflect", type: $funcType([], [], false)}];
+	ptrType$28.methods = [{prop: "kind", name: "kind", pkg: "reflect", type: $funcType([], [Kind], false)}, {prop: "mustBe", name: "mustBe", pkg: "reflect", type: $funcType([Kind], [], false)}, {prop: "mustBeAssignable", name: "mustBeAssignable", pkg: "reflect", type: $funcType([], [], false)}, {prop: "mustBeExported", name: "mustBeExported", pkg: "reflect", type: $funcType([], [], false)}];
+	ptrType$29.methods = [{prop: "Error", name: "Error", pkg: "", type: $funcType([], [$String], false)}];
+	mapIter.init([{prop: "t", name: "t", pkg: "reflect", type: Type, tag: ""}, {prop: "m", name: "m", pkg: "reflect", type: js.Object, tag: ""}, {prop: "keys", name: "keys", pkg: "reflect", type: js.Object, tag: ""}, {prop: "i", name: "i", pkg: "reflect", type: $Int, tag: ""}]);
+	Type.init([{prop: "Align", name: "Align", pkg: "", type: $funcType([], [$Int], false)}, {prop: "AssignableTo", name: "AssignableTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Bits", name: "Bits", pkg: "", type: $funcType([], [$Int], false)}, {prop: "ChanDir", name: "ChanDir", pkg: "", type: $funcType([], [ChanDir], false)}, {prop: "Comparable", name: "Comparable", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "ConvertibleTo", name: "ConvertibleTo", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "Elem", name: "Elem", pkg: "", type: $funcType([], [Type], false)}, {prop: "Field", name: "Field", pkg: "", type: $funcType([$Int], [StructField], false)}, {prop: "FieldAlign", name: "FieldAlign", pkg: "", type: $funcType([], [$Int], false)}, {prop: "FieldByIndex", name: "FieldByIndex", pkg: "", type: $funcType([sliceType$9], [StructField], false)}, {prop: "FieldByName", name: "FieldByName", pkg: "", type: $funcType([$String], [StructField, $Bool], false)}, {prop: "FieldByNameFunc", name: "FieldByNameFunc", pkg: "", type: $funcType([funcType$2], [StructField, $Bool], false)}, {prop: "Implements", name: "Implements", pkg: "", type: $funcType([Type], [$Bool], false)}, {prop: "In", name: "In", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "IsVariadic", name: "IsVariadic", pkg: "", type: $funcType([], [$Bool], false)}, {prop: "Key", name: "Key", pkg: "", type: $funcType([], [Type], false)}, {prop: "Kind", name: "Kind", pkg: "", type: $funcType([], [Kind], false)}, {prop: "Len", name: "Len", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Method", name: "Method", pkg: "", type: $funcType([$Int], [Method], false)}, {prop: "MethodByName", name: "MethodByName", pkg: "", type: $funcType([$String], [Method, $Bool], false)}, {prop: "Name", name: "Name", pkg: "", type: $funcType([], [$String], false)}, {prop: "NumField", name: "NumField", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumIn", name: "NumIn", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumMethod", name: "NumMethod", pkg: "", type: $funcType([], [$Int], false)}, {prop: "NumOut", name: "NumOut", pkg: "", type: $funcType([], [$Int], false)}, {prop: "Out", name: "Out", pkg: "", type: $funcType([$Int], [Type], false)}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $funcType([], [$String], false)}, {prop: "Size", name: "Size", pkg: "", type: $funcType([], [$Uintptr], false)}, {prop: "String", name: "String", pkg: "", type: $funcType([], [$String], false)}, {prop: "common", name: "common", pkg: "reflect", type: $funcType([], [ptrType$1], false)}, {prop: "uncommon", name: "uncommon", pkg: "reflect", type: $funcType([], [ptrType$5], false)}]);
+	rtype.init([{prop: "size", name: "size", pkg: "reflect", type: $Uintptr, tag: ""}, {prop: "hash", name: "hash", pkg: "reflect", type: $Uint32, tag: ""}, {prop: "_$2", name: "_", pkg: "reflect", type: $Uint8, tag: ""}, {prop: "align", name: "align", pkg: "reflect", type: $Uint8, tag: ""}, {prop: "fieldAlign", name: "fieldAlign", pkg: "reflect", type: $Uint8, tag: ""}, {prop: "kind", name: "kind", pkg: "reflect", type: $Uint8, tag: ""}, {prop: "alg", name: "alg", pkg: "reflect", type: ptrType$3, tag: ""}, {prop: "gc", name: "gc", pkg: "reflect", type: arrayType$1, tag: ""}, {prop: "string", name: "string", pkg: "reflect", type: ptrType$4, tag: ""}, {prop: "uncommonType", name: "", pkg: "reflect", type: ptrType$5, tag: ""}, {prop: "ptrToThis", name: "ptrToThis", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "zero", name: "zero", pkg: "reflect", type: $UnsafePointer, tag: ""}]);
+	typeAlg.init([{prop: "hash", name: "hash", pkg: "reflect", type: funcType$3, tag: ""}, {prop: "equal", name: "equal", pkg: "reflect", type: funcType$4, tag: ""}]);
+	method.init([{prop: "name", name: "name", pkg: "reflect", type: ptrType$4, tag: ""}, {prop: "pkgPath", name: "pkgPath", pkg: "reflect", type: ptrType$4, tag: ""}, {prop: "mtyp", name: "mtyp", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "typ", name: "typ", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "ifn", name: "ifn", pkg: "reflect", type: $UnsafePointer, tag: ""}, {prop: "tfn", name: "tfn", pkg: "reflect", type: $UnsafePointer, tag: ""}]);
+	uncommonType.init([{prop: "name", name: "name", pkg: "reflect", type: ptrType$4, tag: ""}, {prop: "pkgPath", name: "pkgPath", pkg: "reflect", type: ptrType$4, tag: ""}, {prop: "methods", name: "methods", pkg: "reflect", type: sliceType$2, tag: ""}]);
+	arrayType.init([{prop: "rtype", name: "", pkg: "reflect", type: rtype, tag: "reflect:\"array\""}, {prop: "elem", name: "elem", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "slice", name: "slice", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "len", name: "len", pkg: "reflect", type: $Uintptr, tag: ""}]);
+	chanType.init([{prop: "rtype", name: "", pkg: "reflect", type: rtype, tag: "reflect:\"chan\""}, {prop: "elem", name: "elem", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "dir", name: "dir", pkg: "reflect", type: $Uintptr, tag: ""}]);
+	funcType.init([{prop: "rtype", name: "", pkg: "reflect", type: rtype, tag: "reflect:\"func\""}, {prop: "dotdotdot", name: "dotdotdot", pkg: "reflect", type: $Bool, tag: ""}, {prop: "in$2", name: "in", pkg: "reflect", type: sliceType$3, tag: ""}, {prop: "out", name: "out", pkg: "reflect", type: sliceType$3, tag: ""}]);
+	imethod.init([{prop: "name", name: "name", pkg: "reflect", type: ptrType$4, tag: ""}, {prop: "pkgPath", name: "pkgPath", pkg: "reflect", type: ptrType$4, tag: ""}, {prop: "typ", name: "typ", pkg: "reflect", type: ptrType$1, tag: ""}]);
+	interfaceType.init([{prop: "rtype", name: "", pkg: "reflect", type: rtype, tag: "reflect:\"interface\""}, {prop: "methods", name: "methods", pkg: "reflect", type: sliceType$4, tag: ""}]);
+	mapType.init([{prop: "rtype", name: "", pkg: "reflect", type: rtype, tag: "reflect:\"map\""}, {prop: "key", name: "key", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "elem", name: "elem", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "bucket", name: "bucket", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "hmap", name: "hmap", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "keysize", name: "keysize", pkg: "reflect", type: $Uint8, tag: ""}, {prop: "indirectkey", name: "indirectkey", pkg: "reflect", type: $Uint8, tag: ""}, {prop: "valuesize", name: "valuesize", pkg: "reflect", type: $Uint8, tag: ""}, {prop: "indirectvalue", name: "indirectvalue", pkg: "reflect", type: $Uint8, tag: ""}, {prop: "bucketsize", name: "bucketsize", pkg: "reflect", type: $Uint16, tag: ""}]);
+	ptrType.init([{prop: "rtype", name: "", pkg: "reflect", type: rtype, tag: "reflect:\"ptr\""}, {prop: "elem", name: "elem", pkg: "reflect", type: ptrType$1, tag: ""}]);
+	sliceType.init([{prop: "rtype", name: "", pkg: "reflect", type: rtype, tag: "reflect:\"slice\""}, {prop: "elem", name: "elem", pkg: "reflect", type: ptrType$1, tag: ""}]);
+	structField.init([{prop: "name", name: "name", pkg: "reflect", type: ptrType$4, tag: ""}, {prop: "pkgPath", name: "pkgPath", pkg: "reflect", type: ptrType$4, tag: ""}, {prop: "typ", name: "typ", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "tag", name: "tag", pkg: "reflect", type: ptrType$4, tag: ""}, {prop: "offset", name: "offset", pkg: "reflect", type: $Uintptr, tag: ""}]);
+	structType.init([{prop: "rtype", name: "", pkg: "reflect", type: rtype, tag: "reflect:\"struct\""}, {prop: "fields", name: "fields", pkg: "reflect", type: sliceType$5, tag: ""}]);
+	Method.init([{prop: "Name", name: "Name", pkg: "", type: $String, tag: ""}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $String, tag: ""}, {prop: "Type", name: "Type", pkg: "", type: Type, tag: ""}, {prop: "Func", name: "Func", pkg: "", type: Value, tag: ""}, {prop: "Index", name: "Index", pkg: "", type: $Int, tag: ""}]);
+	StructField.init([{prop: "Name", name: "Name", pkg: "", type: $String, tag: ""}, {prop: "PkgPath", name: "PkgPath", pkg: "", type: $String, tag: ""}, {prop: "Type", name: "Type", pkg: "", type: Type, tag: ""}, {prop: "Tag", name: "Tag", pkg: "", type: StructTag, tag: ""}, {prop: "Offset", name: "Offset", pkg: "", type: $Uintptr, tag: ""}, {prop: "Index", name: "Index", pkg: "", type: sliceType$9, tag: ""}, {prop: "Anonymous", name: "Anonymous", pkg: "", type: $Bool, tag: ""}]);
+	fieldScan.init([{prop: "typ", name: "typ", pkg: "reflect", type: ptrType$12, tag: ""}, {prop: "index", name: "index", pkg: "reflect", type: sliceType$9, tag: ""}]);
+	Value.init([{prop: "typ", name: "typ", pkg: "reflect", type: ptrType$1, tag: ""}, {prop: "ptr", name: "ptr", pkg: "reflect", type: $UnsafePointer, tag: ""}, {prop: "flag", name: "", pkg: "reflect", type: flag, tag: ""}]);
+	ValueError.init([{prop: "Method", name: "Method", pkg: "", type: $String, tag: ""}, {prop: "Kind", name: "Kind", pkg: "", type: Kind, tag: ""}]);
+	nonEmptyInterface.init([{prop: "itab", name: "itab", pkg: "reflect", type: ptrType$7, tag: ""}, {prop: "word", name: "word", pkg: "reflect", type: $UnsafePointer, tag: ""}]);
 	$pkg.$init = function() {
-		mapIter.init([["t", "t", "reflect", Type, ""], ["m", "m", "reflect", js.Object, ""], ["keys", "keys", "reflect", js.Object, ""], ["i", "i", "reflect", $Int, ""]]);
-		Type.init([["Align", "Align", "", $funcType([], [$Int], false)], ["AssignableTo", "AssignableTo", "", $funcType([Type], [$Bool], false)], ["Bits", "Bits", "", $funcType([], [$Int], false)], ["ChanDir", "ChanDir", "", $funcType([], [ChanDir], false)], ["ConvertibleTo", "ConvertibleTo", "", $funcType([Type], [$Bool], false)], ["Elem", "Elem", "", $funcType([], [Type], false)], ["Field", "Field", "", $funcType([$Int], [StructField], false)], ["FieldAlign", "FieldAlign", "", $funcType([], [$Int], false)], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [StructField], false)], ["FieldByName", "FieldByName", "", $funcType([$String], [StructField, $Bool], false)], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [StructField, $Bool], false)], ["Implements", "Implements", "", $funcType([Type], [$Bool], false)], ["In", "In", "", $funcType([$Int], [Type], false)], ["IsVariadic", "IsVariadic", "", $funcType([], [$Bool], false)], ["Key", "Key", "", $funcType([], [Type], false)], ["Kind", "Kind", "", $funcType([], [Kind], false)], ["Len", "Len", "", $funcType([], [$Int], false)], ["Method", "Method", "", $funcType([$Int], [Method], false)], ["MethodByName", "MethodByName", "", $funcType([$String], [Method, $Bool], false)], ["Name", "Name", "", $funcType([], [$String], false)], ["NumField", "NumField", "", $funcType([], [$Int], false)], ["NumIn", "NumIn", "", $funcType([], [$Int], false)], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false)], ["NumOut", "NumOut", "", $funcType([], [$Int], false)], ["Out", "Out", "", $funcType([$Int], [Type], false)], ["PkgPath", "PkgPath", "", $funcType([], [$String], false)], ["Size", "Size", "", $funcType([], [$Uintptr], false)], ["String", "String", "", $funcType([], [$String], false)], ["common", "common", "reflect", $funcType([], [($ptrType(rtype))], false)], ["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false)]]);
-		Kind.methods = [["String", "String", "", $funcType([], [$String], false), -1]];
-		($ptrType(Kind)).methods = [["String", "String", "", $funcType([], [$String], false), -1]];
-		rtype.methods = [["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 9]];
-		($ptrType(rtype)).methods = [["Align", "Align", "", $funcType([], [$Int], false), -1], ["AssignableTo", "AssignableTo", "", $funcType([Type], [$Bool], false), -1], ["Bits", "Bits", "", $funcType([], [$Int], false), -1], ["ChanDir", "ChanDir", "", $funcType([], [ChanDir], false), -1], ["ConvertibleTo", "ConvertibleTo", "", $funcType([Type], [$Bool], false), -1], ["Elem", "Elem", "", $funcType([], [Type], false), -1], ["Field", "Field", "", $funcType([$Int], [StructField], false), -1], ["FieldAlign", "FieldAlign", "", $funcType([], [$Int], false), -1], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [StructField], false), -1], ["FieldByName", "FieldByName", "", $funcType([$String], [StructField, $Bool], false), -1], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [StructField, $Bool], false), -1], ["Implements", "Implements", "", $funcType([Type], [$Bool], false), -1], ["In", "In", "", $funcType([$Int], [Type], false), -1], ["IsVariadic", "IsVariadic", "", $funcType([], [$Bool], false), -1], ["Key", "Key", "", $funcType([], [Type], false), -1], ["Kind", "Kind", "", $funcType([], [Kind], false), -1], ["Len", "Len", "", $funcType([], [$Int], false), -1], ["Method", "Method", "", $funcType([$Int], [Method], false), -1], ["MethodByName", "MethodByName", "", $funcType([$String], [Method, $Bool], false), -1], ["Name", "Name", "", $funcType([], [$String], false), -1], ["NumField", "NumField", "", $funcType([], [$Int], false), -1], ["NumIn", "NumIn", "", $funcType([], [$Int], false), -1], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), -1], ["NumOut", "NumOut", "", $funcType([], [$Int], false), -1], ["Out", "Out", "", $funcType([$Int], [Type], false), -1], ["PkgPath", "PkgPath", "", $funcType([], [$String], false), -1], ["Size", "Size", "", $funcType([], [$Uintptr], false), -1], ["String", "String", "", $funcType([], [$String], false), -1], ["common", "common", "reflect", $funcType([], [($ptrType(rtype))], false), -1], ["pointers", "pointers", "reflect", $funcType([], [$Bool], false), -1], ["ptrTo", "ptrTo", "reflect", $funcType([], [($ptrType(rtype))], false), -1], ["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 9]];
-		rtype.init([["size", "size", "reflect", $Uintptr, ""], ["hash", "hash", "reflect", $Uint32, ""], ["_$2", "_", "reflect", $Uint8, ""], ["align", "align", "reflect", $Uint8, ""], ["fieldAlign", "fieldAlign", "reflect", $Uint8, ""], ["kind", "kind", "reflect", $Uint8, ""], ["alg", "alg", "reflect", ($ptrType($Uintptr)), ""], ["gc", "gc", "reflect", $UnsafePointer, ""], ["string", "string", "reflect", ($ptrType($String)), ""], ["uncommonType", "", "reflect", ($ptrType(uncommonType)), ""], ["ptrToThis", "ptrToThis", "reflect", ($ptrType(rtype)), ""], ["zero", "zero", "reflect", $UnsafePointer, ""]]);
-		method.init([["name", "name", "reflect", ($ptrType($String)), ""], ["pkgPath", "pkgPath", "reflect", ($ptrType($String)), ""], ["mtyp", "mtyp", "reflect", ($ptrType(rtype)), ""], ["typ", "typ", "reflect", ($ptrType(rtype)), ""], ["ifn", "ifn", "reflect", $UnsafePointer, ""], ["tfn", "tfn", "reflect", $UnsafePointer, ""]]);
-		($ptrType(uncommonType)).methods = [["Method", "Method", "", $funcType([$Int], [Method], false), -1], ["MethodByName", "MethodByName", "", $funcType([$String], [Method, $Bool], false), -1], ["Name", "Name", "", $funcType([], [$String], false), -1], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), -1], ["PkgPath", "PkgPath", "", $funcType([], [$String], false), -1], ["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), -1]];
-		uncommonType.init([["name", "name", "reflect", ($ptrType($String)), ""], ["pkgPath", "pkgPath", "reflect", ($ptrType($String)), ""], ["methods", "methods", "reflect", ($sliceType(method)), ""]]);
-		ChanDir.methods = [["String", "String", "", $funcType([], [$String], false), -1]];
-		($ptrType(ChanDir)).methods = [["String", "String", "", $funcType([], [$String], false), -1]];
-		arrayType.methods = [["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		($ptrType(arrayType)).methods = [["Align", "Align", "", $funcType([], [$Int], false), 0], ["AssignableTo", "AssignableTo", "", $funcType([Type], [$Bool], false), 0], ["Bits", "Bits", "", $funcType([], [$Int], false), 0], ["ChanDir", "ChanDir", "", $funcType([], [ChanDir], false), 0], ["ConvertibleTo", "ConvertibleTo", "", $funcType([Type], [$Bool], false), 0], ["Elem", "Elem", "", $funcType([], [Type], false), 0], ["Field", "Field", "", $funcType([$Int], [StructField], false), 0], ["FieldAlign", "FieldAlign", "", $funcType([], [$Int], false), 0], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [StructField], false), 0], ["FieldByName", "FieldByName", "", $funcType([$String], [StructField, $Bool], false), 0], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [StructField, $Bool], false), 0], ["Implements", "Implements", "", $funcType([Type], [$Bool], false), 0], ["In", "In", "", $funcType([$Int], [Type], false), 0], ["IsVariadic", "IsVariadic", "", $funcType([], [$Bool], false), 0], ["Key", "Key", "", $funcType([], [Type], false), 0], ["Kind", "Kind", "", $funcType([], [Kind], false), 0], ["Len", "Len", "", $funcType([], [$Int], false), 0], ["Method", "Method", "", $funcType([$Int], [Method], false), 0], ["MethodByName", "MethodByName", "", $funcType([$String], [Method, $Bool], false), 0], ["Name", "Name", "", $funcType([], [$String], false), 0], ["NumField", "NumField", "", $funcType([], [$Int], false), 0], ["NumIn", "NumIn", "", $funcType([], [$Int], false), 0], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), 0], ["NumOut", "NumOut", "", $funcType([], [$Int], false), 0], ["Out", "Out", "", $funcType([$Int], [Type], false), 0], ["PkgPath", "PkgPath", "", $funcType([], [$String], false), 0], ["Size", "Size", "", $funcType([], [$Uintptr], false), 0], ["String", "String", "", $funcType([], [$String], false), 0], ["common", "common", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["pointers", "pointers", "reflect", $funcType([], [$Bool], false), 0], ["ptrTo", "ptrTo", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		arrayType.init([["rtype", "", "reflect", rtype, "reflect:\"array\""], ["elem", "elem", "reflect", ($ptrType(rtype)), ""], ["slice", "slice", "reflect", ($ptrType(rtype)), ""], ["len", "len", "reflect", $Uintptr, ""]]);
-		chanType.methods = [["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		($ptrType(chanType)).methods = [["Align", "Align", "", $funcType([], [$Int], false), 0], ["AssignableTo", "AssignableTo", "", $funcType([Type], [$Bool], false), 0], ["Bits", "Bits", "", $funcType([], [$Int], false), 0], ["ChanDir", "ChanDir", "", $funcType([], [ChanDir], false), 0], ["ConvertibleTo", "ConvertibleTo", "", $funcType([Type], [$Bool], false), 0], ["Elem", "Elem", "", $funcType([], [Type], false), 0], ["Field", "Field", "", $funcType([$Int], [StructField], false), 0], ["FieldAlign", "FieldAlign", "", $funcType([], [$Int], false), 0], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [StructField], false), 0], ["FieldByName", "FieldByName", "", $funcType([$String], [StructField, $Bool], false), 0], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [StructField, $Bool], false), 0], ["Implements", "Implements", "", $funcType([Type], [$Bool], false), 0], ["In", "In", "", $funcType([$Int], [Type], false), 0], ["IsVariadic", "IsVariadic", "", $funcType([], [$Bool], false), 0], ["Key", "Key", "", $funcType([], [Type], false), 0], ["Kind", "Kind", "", $funcType([], [Kind], false), 0], ["Len", "Len", "", $funcType([], [$Int], false), 0], ["Method", "Method", "", $funcType([$Int], [Method], false), 0], ["MethodByName", "MethodByName", "", $funcType([$String], [Method, $Bool], false), 0], ["Name", "Name", "", $funcType([], [$String], false), 0], ["NumField", "NumField", "", $funcType([], [$Int], false), 0], ["NumIn", "NumIn", "", $funcType([], [$Int], false), 0], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), 0], ["NumOut", "NumOut", "", $funcType([], [$Int], false), 0], ["Out", "Out", "", $funcType([$Int], [Type], false), 0], ["PkgPath", "PkgPath", "", $funcType([], [$String], false), 0], ["Size", "Size", "", $funcType([], [$Uintptr], false), 0], ["String", "String", "", $funcType([], [$String], false), 0], ["common", "common", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["pointers", "pointers", "reflect", $funcType([], [$Bool], false), 0], ["ptrTo", "ptrTo", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		chanType.init([["rtype", "", "reflect", rtype, "reflect:\"chan\""], ["elem", "elem", "reflect", ($ptrType(rtype)), ""], ["dir", "dir", "reflect", $Uintptr, ""]]);
-		funcType.methods = [["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		($ptrType(funcType)).methods = [["Align", "Align", "", $funcType([], [$Int], false), 0], ["AssignableTo", "AssignableTo", "", $funcType([Type], [$Bool], false), 0], ["Bits", "Bits", "", $funcType([], [$Int], false), 0], ["ChanDir", "ChanDir", "", $funcType([], [ChanDir], false), 0], ["ConvertibleTo", "ConvertibleTo", "", $funcType([Type], [$Bool], false), 0], ["Elem", "Elem", "", $funcType([], [Type], false), 0], ["Field", "Field", "", $funcType([$Int], [StructField], false), 0], ["FieldAlign", "FieldAlign", "", $funcType([], [$Int], false), 0], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [StructField], false), 0], ["FieldByName", "FieldByName", "", $funcType([$String], [StructField, $Bool], false), 0], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [StructField, $Bool], false), 0], ["Implements", "Implements", "", $funcType([Type], [$Bool], false), 0], ["In", "In", "", $funcType([$Int], [Type], false), 0], ["IsVariadic", "IsVariadic", "", $funcType([], [$Bool], false), 0], ["Key", "Key", "", $funcType([], [Type], false), 0], ["Kind", "Kind", "", $funcType([], [Kind], false), 0], ["Len", "Len", "", $funcType([], [$Int], false), 0], ["Method", "Method", "", $funcType([$Int], [Method], false), 0], ["MethodByName", "MethodByName", "", $funcType([$String], [Method, $Bool], false), 0], ["Name", "Name", "", $funcType([], [$String], false), 0], ["NumField", "NumField", "", $funcType([], [$Int], false), 0], ["NumIn", "NumIn", "", $funcType([], [$Int], false), 0], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), 0], ["NumOut", "NumOut", "", $funcType([], [$Int], false), 0], ["Out", "Out", "", $funcType([$Int], [Type], false), 0], ["PkgPath", "PkgPath", "", $funcType([], [$String], false), 0], ["Size", "Size", "", $funcType([], [$Uintptr], false), 0], ["String", "String", "", $funcType([], [$String], false), 0], ["common", "common", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["pointers", "pointers", "reflect", $funcType([], [$Bool], false), 0], ["ptrTo", "ptrTo", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		funcType.init([["rtype", "", "reflect", rtype, "reflect:\"func\""], ["dotdotdot", "dotdotdot", "reflect", $Bool, ""], ["in$2", "in", "reflect", ($sliceType(($ptrType(rtype)))), ""], ["out", "out", "reflect", ($sliceType(($ptrType(rtype)))), ""]]);
-		imethod.init([["name", "name", "reflect", ($ptrType($String)), ""], ["pkgPath", "pkgPath", "reflect", ($ptrType($String)), ""], ["typ", "typ", "reflect", ($ptrType(rtype)), ""]]);
-		interfaceType.methods = [["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		($ptrType(interfaceType)).methods = [["Align", "Align", "", $funcType([], [$Int], false), 0], ["AssignableTo", "AssignableTo", "", $funcType([Type], [$Bool], false), 0], ["Bits", "Bits", "", $funcType([], [$Int], false), 0], ["ChanDir", "ChanDir", "", $funcType([], [ChanDir], false), 0], ["ConvertibleTo", "ConvertibleTo", "", $funcType([Type], [$Bool], false), 0], ["Elem", "Elem", "", $funcType([], [Type], false), 0], ["Field", "Field", "", $funcType([$Int], [StructField], false), 0], ["FieldAlign", "FieldAlign", "", $funcType([], [$Int], false), 0], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [StructField], false), 0], ["FieldByName", "FieldByName", "", $funcType([$String], [StructField, $Bool], false), 0], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [StructField, $Bool], false), 0], ["Implements", "Implements", "", $funcType([Type], [$Bool], false), 0], ["In", "In", "", $funcType([$Int], [Type], false), 0], ["IsVariadic", "IsVariadic", "", $funcType([], [$Bool], false), 0], ["Key", "Key", "", $funcType([], [Type], false), 0], ["Kind", "Kind", "", $funcType([], [Kind], false), 0], ["Len", "Len", "", $funcType([], [$Int], false), 0], ["Method", "Method", "", $funcType([$Int], [Method], false), -1], ["MethodByName", "MethodByName", "", $funcType([$String], [Method, $Bool], false), -1], ["Name", "Name", "", $funcType([], [$String], false), 0], ["NumField", "NumField", "", $funcType([], [$Int], false), 0], ["NumIn", "NumIn", "", $funcType([], [$Int], false), 0], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), -1], ["NumOut", "NumOut", "", $funcType([], [$Int], false), 0], ["Out", "Out", "", $funcType([$Int], [Type], false), 0], ["PkgPath", "PkgPath", "", $funcType([], [$String], false), 0], ["Size", "Size", "", $funcType([], [$Uintptr], false), 0], ["String", "String", "", $funcType([], [$String], false), 0], ["common", "common", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["pointers", "pointers", "reflect", $funcType([], [$Bool], false), 0], ["ptrTo", "ptrTo", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		interfaceType.init([["rtype", "", "reflect", rtype, "reflect:\"interface\""], ["methods", "methods", "reflect", ($sliceType(imethod)), ""]]);
-		mapType.methods = [["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		($ptrType(mapType)).methods = [["Align", "Align", "", $funcType([], [$Int], false), 0], ["AssignableTo", "AssignableTo", "", $funcType([Type], [$Bool], false), 0], ["Bits", "Bits", "", $funcType([], [$Int], false), 0], ["ChanDir", "ChanDir", "", $funcType([], [ChanDir], false), 0], ["ConvertibleTo", "ConvertibleTo", "", $funcType([Type], [$Bool], false), 0], ["Elem", "Elem", "", $funcType([], [Type], false), 0], ["Field", "Field", "", $funcType([$Int], [StructField], false), 0], ["FieldAlign", "FieldAlign", "", $funcType([], [$Int], false), 0], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [StructField], false), 0], ["FieldByName", "FieldByName", "", $funcType([$String], [StructField, $Bool], false), 0], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [StructField, $Bool], false), 0], ["Implements", "Implements", "", $funcType([Type], [$Bool], false), 0], ["In", "In", "", $funcType([$Int], [Type], false), 0], ["IsVariadic", "IsVariadic", "", $funcType([], [$Bool], false), 0], ["Key", "Key", "", $funcType([], [Type], false), 0], ["Kind", "Kind", "", $funcType([], [Kind], false), 0], ["Len", "Len", "", $funcType([], [$Int], false), 0], ["Method", "Method", "", $funcType([$Int], [Method], false), 0], ["MethodByName", "MethodByName", "", $funcType([$String], [Method, $Bool], false), 0], ["Name", "Name", "", $funcType([], [$String], false), 0], ["NumField", "NumField", "", $funcType([], [$Int], false), 0], ["NumIn", "NumIn", "", $funcType([], [$Int], false), 0], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), 0], ["NumOut", "NumOut", "", $funcType([], [$Int], false), 0], ["Out", "Out", "", $funcType([$Int], [Type], false), 0], ["PkgPath", "PkgPath", "", $funcType([], [$String], false), 0], ["Size", "Size", "", $funcType([], [$Uintptr], false), 0], ["String", "String", "", $funcType([], [$String], false), 0], ["common", "common", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["pointers", "pointers", "reflect", $funcType([], [$Bool], false), 0], ["ptrTo", "ptrTo", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		mapType.init([["rtype", "", "reflect", rtype, "reflect:\"map\""], ["key", "key", "reflect", ($ptrType(rtype)), ""], ["elem", "elem", "reflect", ($ptrType(rtype)), ""], ["bucket", "bucket", "reflect", ($ptrType(rtype)), ""], ["hmap", "hmap", "reflect", ($ptrType(rtype)), ""]]);
-		ptrType.methods = [["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		($ptrType(ptrType)).methods = [["Align", "Align", "", $funcType([], [$Int], false), 0], ["AssignableTo", "AssignableTo", "", $funcType([Type], [$Bool], false), 0], ["Bits", "Bits", "", $funcType([], [$Int], false), 0], ["ChanDir", "ChanDir", "", $funcType([], [ChanDir], false), 0], ["ConvertibleTo", "ConvertibleTo", "", $funcType([Type], [$Bool], false), 0], ["Elem", "Elem", "", $funcType([], [Type], false), 0], ["Field", "Field", "", $funcType([$Int], [StructField], false), 0], ["FieldAlign", "FieldAlign", "", $funcType([], [$Int], false), 0], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [StructField], false), 0], ["FieldByName", "FieldByName", "", $funcType([$String], [StructField, $Bool], false), 0], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [StructField, $Bool], false), 0], ["Implements", "Implements", "", $funcType([Type], [$Bool], false), 0], ["In", "In", "", $funcType([$Int], [Type], false), 0], ["IsVariadic", "IsVariadic", "", $funcType([], [$Bool], false), 0], ["Key", "Key", "", $funcType([], [Type], false), 0], ["Kind", "Kind", "", $funcType([], [Kind], false), 0], ["Len", "Len", "", $funcType([], [$Int], false), 0], ["Method", "Method", "", $funcType([$Int], [Method], false), 0], ["MethodByName", "MethodByName", "", $funcType([$String], [Method, $Bool], false), 0], ["Name", "Name", "", $funcType([], [$String], false), 0], ["NumField", "NumField", "", $funcType([], [$Int], false), 0], ["NumIn", "NumIn", "", $funcType([], [$Int], false), 0], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), 0], ["NumOut", "NumOut", "", $funcType([], [$Int], false), 0], ["Out", "Out", "", $funcType([$Int], [Type], false), 0], ["PkgPath", "PkgPath", "", $funcType([], [$String], false), 0], ["Size", "Size", "", $funcType([], [$Uintptr], false), 0], ["String", "String", "", $funcType([], [$String], false), 0], ["common", "common", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["pointers", "pointers", "reflect", $funcType([], [$Bool], false), 0], ["ptrTo", "ptrTo", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		ptrType.init([["rtype", "", "reflect", rtype, "reflect:\"ptr\""], ["elem", "elem", "reflect", ($ptrType(rtype)), ""]]);
-		sliceType.methods = [["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		($ptrType(sliceType)).methods = [["Align", "Align", "", $funcType([], [$Int], false), 0], ["AssignableTo", "AssignableTo", "", $funcType([Type], [$Bool], false), 0], ["Bits", "Bits", "", $funcType([], [$Int], false), 0], ["ChanDir", "ChanDir", "", $funcType([], [ChanDir], false), 0], ["ConvertibleTo", "ConvertibleTo", "", $funcType([Type], [$Bool], false), 0], ["Elem", "Elem", "", $funcType([], [Type], false), 0], ["Field", "Field", "", $funcType([$Int], [StructField], false), 0], ["FieldAlign", "FieldAlign", "", $funcType([], [$Int], false), 0], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [StructField], false), 0], ["FieldByName", "FieldByName", "", $funcType([$String], [StructField, $Bool], false), 0], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [StructField, $Bool], false), 0], ["Implements", "Implements", "", $funcType([Type], [$Bool], false), 0], ["In", "In", "", $funcType([$Int], [Type], false), 0], ["IsVariadic", "IsVariadic", "", $funcType([], [$Bool], false), 0], ["Key", "Key", "", $funcType([], [Type], false), 0], ["Kind", "Kind", "", $funcType([], [Kind], false), 0], ["Len", "Len", "", $funcType([], [$Int], false), 0], ["Method", "Method", "", $funcType([$Int], [Method], false), 0], ["MethodByName", "MethodByName", "", $funcType([$String], [Method, $Bool], false), 0], ["Name", "Name", "", $funcType([], [$String], false), 0], ["NumField", "NumField", "", $funcType([], [$Int], false), 0], ["NumIn", "NumIn", "", $funcType([], [$Int], false), 0], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), 0], ["NumOut", "NumOut", "", $funcType([], [$Int], false), 0], ["Out", "Out", "", $funcType([$Int], [Type], false), 0], ["PkgPath", "PkgPath", "", $funcType([], [$String], false), 0], ["Size", "Size", "", $funcType([], [$Uintptr], false), 0], ["String", "String", "", $funcType([], [$String], false), 0], ["common", "common", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["pointers", "pointers", "reflect", $funcType([], [$Bool], false), 0], ["ptrTo", "ptrTo", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		sliceType.init([["rtype", "", "reflect", rtype, "reflect:\"slice\""], ["elem", "elem", "reflect", ($ptrType(rtype)), ""]]);
-		structField.init([["name", "name", "reflect", ($ptrType($String)), ""], ["pkgPath", "pkgPath", "reflect", ($ptrType($String)), ""], ["typ", "typ", "reflect", ($ptrType(rtype)), ""], ["tag", "tag", "reflect", ($ptrType($String)), ""], ["offset", "offset", "reflect", $Uintptr, ""]]);
-		structType.methods = [["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		($ptrType(structType)).methods = [["Align", "Align", "", $funcType([], [$Int], false), 0], ["AssignableTo", "AssignableTo", "", $funcType([Type], [$Bool], false), 0], ["Bits", "Bits", "", $funcType([], [$Int], false), 0], ["ChanDir", "ChanDir", "", $funcType([], [ChanDir], false), 0], ["ConvertibleTo", "ConvertibleTo", "", $funcType([Type], [$Bool], false), 0], ["Elem", "Elem", "", $funcType([], [Type], false), 0], ["Field", "Field", "", $funcType([$Int], [StructField], false), -1], ["FieldAlign", "FieldAlign", "", $funcType([], [$Int], false), 0], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [StructField], false), -1], ["FieldByName", "FieldByName", "", $funcType([$String], [StructField, $Bool], false), -1], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [StructField, $Bool], false), -1], ["Implements", "Implements", "", $funcType([Type], [$Bool], false), 0], ["In", "In", "", $funcType([$Int], [Type], false), 0], ["IsVariadic", "IsVariadic", "", $funcType([], [$Bool], false), 0], ["Key", "Key", "", $funcType([], [Type], false), 0], ["Kind", "Kind", "", $funcType([], [Kind], false), 0], ["Len", "Len", "", $funcType([], [$Int], false), 0], ["Method", "Method", "", $funcType([$Int], [Method], false), 0], ["MethodByName", "MethodByName", "", $funcType([$String], [Method, $Bool], false), 0], ["Name", "Name", "", $funcType([], [$String], false), 0], ["NumField", "NumField", "", $funcType([], [$Int], false), 0], ["NumIn", "NumIn", "", $funcType([], [$Int], false), 0], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), 0], ["NumOut", "NumOut", "", $funcType([], [$Int], false), 0], ["Out", "Out", "", $funcType([$Int], [Type], false), 0], ["PkgPath", "PkgPath", "", $funcType([], [$String], false), 0], ["Size", "Size", "", $funcType([], [$Uintptr], false), 0], ["String", "String", "", $funcType([], [$String], false), 0], ["common", "common", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["pointers", "pointers", "reflect", $funcType([], [$Bool], false), 0], ["ptrTo", "ptrTo", "reflect", $funcType([], [($ptrType(rtype))], false), 0], ["uncommon", "uncommon", "reflect", $funcType([], [($ptrType(uncommonType))], false), 0]];
-		structType.init([["rtype", "", "reflect", rtype, "reflect:\"struct\""], ["fields", "fields", "reflect", ($sliceType(structField)), ""]]);
-		Method.init([["Name", "Name", "", $String, ""], ["PkgPath", "PkgPath", "", $String, ""], ["Type", "Type", "", Type, ""], ["Func", "Func", "", Value, ""], ["Index", "Index", "", $Int, ""]]);
-		StructField.init([["Name", "Name", "", $String, ""], ["PkgPath", "PkgPath", "", $String, ""], ["Type", "Type", "", Type, ""], ["Tag", "Tag", "", StructTag, ""], ["Offset", "Offset", "", $Uintptr, ""], ["Index", "Index", "", ($sliceType($Int)), ""], ["Anonymous", "Anonymous", "", $Bool, ""]]);
-		StructTag.methods = [["Get", "Get", "", $funcType([$String], [$String], false), -1]];
-		($ptrType(StructTag)).methods = [["Get", "Get", "", $funcType([$String], [$String], false), -1]];
-		fieldScan.init([["typ", "typ", "reflect", ($ptrType(structType)), ""], ["index", "index", "reflect", ($sliceType($Int)), ""]]);
-		Value.methods = [["Addr", "Addr", "", $funcType([], [Value], false), -1], ["Bool", "Bool", "", $funcType([], [$Bool], false), -1], ["Bytes", "Bytes", "", $funcType([], [($sliceType($Uint8))], false), -1], ["Call", "Call", "", $funcType([($sliceType(Value))], [($sliceType(Value))], false), -1], ["CallSlice", "CallSlice", "", $funcType([($sliceType(Value))], [($sliceType(Value))], false), -1], ["CanAddr", "CanAddr", "", $funcType([], [$Bool], false), -1], ["CanInterface", "CanInterface", "", $funcType([], [$Bool], false), -1], ["CanSet", "CanSet", "", $funcType([], [$Bool], false), -1], ["Cap", "Cap", "", $funcType([], [$Int], false), -1], ["Close", "Close", "", $funcType([], [], false), -1], ["Complex", "Complex", "", $funcType([], [$Complex128], false), -1], ["Convert", "Convert", "", $funcType([Type], [Value], false), -1], ["Elem", "Elem", "", $funcType([], [Value], false), -1], ["Field", "Field", "", $funcType([$Int], [Value], false), -1], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [Value], false), -1], ["FieldByName", "FieldByName", "", $funcType([$String], [Value], false), -1], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [Value], false), -1], ["Float", "Float", "", $funcType([], [$Float64], false), -1], ["Index", "Index", "", $funcType([$Int], [Value], false), -1], ["Int", "Int", "", $funcType([], [$Int64], false), -1], ["Interface", "Interface", "", $funcType([], [$emptyInterface], false), -1], ["InterfaceData", "InterfaceData", "", $funcType([], [($arrayType($Uintptr, 2))], false), -1], ["IsNil", "IsNil", "", $funcType([], [$Bool], false), -1], ["IsValid", "IsValid", "", $funcType([], [$Bool], false), -1], ["Kind", "Kind", "", $funcType([], [Kind], false), -1], ["Len", "Len", "", $funcType([], [$Int], false), -1], ["MapIndex", "MapIndex", "", $funcType([Value], [Value], false), -1], ["MapKeys", "MapKeys", "", $funcType([], [($sliceType(Value))], false), -1], ["Method", "Method", "", $funcType([$Int], [Value], false), -1], ["MethodByName", "MethodByName", "", $funcType([$String], [Value], false), -1], ["NumField", "NumField", "", $funcType([], [$Int], false), -1], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), -1], ["OverflowComplex", "OverflowComplex", "", $funcType([$Complex128], [$Bool], false), -1], ["OverflowFloat", "OverflowFloat", "", $funcType([$Float64], [$Bool], false), -1], ["OverflowInt", "OverflowInt", "", $funcType([$Int64], [$Bool], false), -1], ["OverflowUint", "OverflowUint", "", $funcType([$Uint64], [$Bool], false), -1], ["Pointer", "Pointer", "", $funcType([], [$Uintptr], false), -1], ["Recv", "Recv", "", $funcType([], [Value, $Bool], false), -1], ["Send", "Send", "", $funcType([Value], [], false), -1], ["Set", "Set", "", $funcType([Value], [], false), -1], ["SetBool", "SetBool", "", $funcType([$Bool], [], false), -1], ["SetBytes", "SetBytes", "", $funcType([($sliceType($Uint8))], [], false), -1], ["SetCap", "SetCap", "", $funcType([$Int], [], false), -1], ["SetComplex", "SetComplex", "", $funcType([$Complex128], [], false), -1], ["SetFloat", "SetFloat", "", $funcType([$Float64], [], false), -1], ["SetInt", "SetInt", "", $funcType([$Int64], [], false), -1], ["SetLen", "SetLen", "", $funcType([$Int], [], false), -1], ["SetMapIndex", "SetMapIndex", "", $funcType([Value, Value], [], false), -1], ["SetPointer", "SetPointer", "", $funcType([$UnsafePointer], [], false), -1], ["SetString", "SetString", "", $funcType([$String], [], false), -1], ["SetUint", "SetUint", "", $funcType([$Uint64], [], false), -1], ["Slice", "Slice", "", $funcType([$Int, $Int], [Value], false), -1], ["Slice3", "Slice3", "", $funcType([$Int, $Int, $Int], [Value], false), -1], ["String", "String", "", $funcType([], [$String], false), -1], ["TryRecv", "TryRecv", "", $funcType([], [Value, $Bool], false), -1], ["TrySend", "TrySend", "", $funcType([Value], [$Bool], false), -1], ["Type", "Type", "", $funcType([], [Type], false), -1], ["Uint", "Uint", "", $funcType([], [$Uint64], false), -1], ["UnsafeAddr", "UnsafeAddr", "", $funcType([], [$Uintptr], false), -1], ["assignTo", "assignTo", "reflect", $funcType([$String, ($ptrType(rtype)), ($ptrType($emptyInterface))], [Value], false), -1], ["call", "call", "reflect", $funcType([$String, ($sliceType(Value))], [($sliceType(Value))], false), -1], ["iword", "iword", "reflect", $funcType([], [iword], false), -1], ["kind", "kind", "reflect", $funcType([], [Kind], false), 3], ["mustBe", "mustBe", "reflect", $funcType([Kind], [], false), 3], ["mustBeAssignable", "mustBeAssignable", "reflect", $funcType([], [], false), 3], ["mustBeExported", "mustBeExported", "reflect", $funcType([], [], false), 3], ["pointer", "pointer", "reflect", $funcType([], [$UnsafePointer], false), -1], ["recv", "recv", "reflect", $funcType([$Bool], [Value, $Bool], false), -1], ["runes", "runes", "reflect", $funcType([], [($sliceType($Int32))], false), -1], ["send", "send", "reflect", $funcType([Value, $Bool], [$Bool], false), -1], ["setRunes", "setRunes", "reflect", $funcType([($sliceType($Int32))], [], false), -1]];
-		($ptrType(Value)).methods = [["Addr", "Addr", "", $funcType([], [Value], false), -1], ["Bool", "Bool", "", $funcType([], [$Bool], false), -1], ["Bytes", "Bytes", "", $funcType([], [($sliceType($Uint8))], false), -1], ["Call", "Call", "", $funcType([($sliceType(Value))], [($sliceType(Value))], false), -1], ["CallSlice", "CallSlice", "", $funcType([($sliceType(Value))], [($sliceType(Value))], false), -1], ["CanAddr", "CanAddr", "", $funcType([], [$Bool], false), -1], ["CanInterface", "CanInterface", "", $funcType([], [$Bool], false), -1], ["CanSet", "CanSet", "", $funcType([], [$Bool], false), -1], ["Cap", "Cap", "", $funcType([], [$Int], false), -1], ["Close", "Close", "", $funcType([], [], false), -1], ["Complex", "Complex", "", $funcType([], [$Complex128], false), -1], ["Convert", "Convert", "", $funcType([Type], [Value], false), -1], ["Elem", "Elem", "", $funcType([], [Value], false), -1], ["Field", "Field", "", $funcType([$Int], [Value], false), -1], ["FieldByIndex", "FieldByIndex", "", $funcType([($sliceType($Int))], [Value], false), -1], ["FieldByName", "FieldByName", "", $funcType([$String], [Value], false), -1], ["FieldByNameFunc", "FieldByNameFunc", "", $funcType([($funcType([$String], [$Bool], false))], [Value], false), -1], ["Float", "Float", "", $funcType([], [$Float64], false), -1], ["Index", "Index", "", $funcType([$Int], [Value], false), -1], ["Int", "Int", "", $funcType([], [$Int64], false), -1], ["Interface", "Interface", "", $funcType([], [$emptyInterface], false), -1], ["InterfaceData", "InterfaceData", "", $funcType([], [($arrayType($Uintptr, 2))], false), -1], ["IsNil", "IsNil", "", $funcType([], [$Bool], false), -1], ["IsValid", "IsValid", "", $funcType([], [$Bool], false), -1], ["Kind", "Kind", "", $funcType([], [Kind], false), -1], ["Len", "Len", "", $funcType([], [$Int], false), -1], ["MapIndex", "MapIndex", "", $funcType([Value], [Value], false), -1], ["MapKeys", "MapKeys", "", $funcType([], [($sliceType(Value))], false), -1], ["Method", "Method", "", $funcType([$Int], [Value], false), -1], ["MethodByName", "MethodByName", "", $funcType([$String], [Value], false), -1], ["NumField", "NumField", "", $funcType([], [$Int], false), -1], ["NumMethod", "NumMethod", "", $funcType([], [$Int], false), -1], ["OverflowComplex", "OverflowComplex", "", $funcType([$Complex128], [$Bool], false), -1], ["OverflowFloat", "OverflowFloat", "", $funcType([$Float64], [$Bool], false), -1], ["OverflowInt", "OverflowInt", "", $funcType([$Int64], [$Bool], false), -1], ["OverflowUint", "OverflowUint", "", $funcType([$Uint64], [$Bool], false), -1], ["Pointer", "Pointer", "", $funcType([], [$Uintptr], false), -1], ["Recv", "Recv", "", $funcType([], [Value, $Bool], false), -1], ["Send", "Send", "", $funcType([Value], [], false), -1], ["Set", "Set", "", $funcType([Value], [], false), -1], ["SetBool", "SetBool", "", $funcType([$Bool], [], false), -1], ["SetBytes", "SetBytes", "", $funcType([($sliceType($Uint8))], [], false), -1], ["SetCap", "SetCap", "", $funcType([$Int], [], false), -1], ["SetComplex", "SetComplex", "", $funcType([$Complex128], [], false), -1], ["SetFloat", "SetFloat", "", $funcType([$Float64], [], false), -1], ["SetInt", "SetInt", "", $funcType([$Int64], [], false), -1], ["SetLen", "SetLen", "", $funcType([$Int], [], false), -1], ["SetMapIndex", "SetMapIndex", "", $funcType([Value, Value], [], false), -1], ["SetPointer", "SetPointer", "", $funcType([$UnsafePointer], [], false), -1], ["SetString", "SetString", "", $funcType([$String], [], false), -1], ["SetUint", "SetUint", "", $funcType([$Uint64], [], false), -1], ["Slice", "Slice", "", $funcType([$Int, $Int], [Value], false), -1], ["Slice3", "Slice3", "", $funcType([$Int, $Int, $Int], [Value], false), -1], ["String", "String", "", $funcType([], [$String], false), -1], ["TryRecv", "TryRecv", "", $funcType([], [Value, $Bool], false), -1], ["TrySend", "TrySend", "", $funcType([Value], [$Bool], false), -1], ["Type", "Type", "", $funcType([], [Type], false), -1], ["Uint", "Uint", "", $funcType([], [$Uint64], false), -1], ["UnsafeAddr", "UnsafeAddr", "", $funcType([], [$Uintptr], false), -1], ["assignTo", "assignTo", "reflect", $funcType([$String, ($ptrType(rtype)), ($ptrType($emptyInterface))], [Value], false), -1], ["call", "call", "reflect", $funcType([$String, ($sliceType(Value))], [($sliceType(Value))], false), -1], ["iword", "iword", "reflect", $funcType([], [iword], false), -1], ["kind", "kind", "reflect", $funcType([], [Kind], false), 3], ["mustBe", "mustBe", "reflect", $funcType([Kind], [], false), 3], ["mustBeAssignable", "mustBeAssignable", "reflect", $funcType([], [], false), 3], ["mustBeExported", "mustBeExported", "reflect", $funcType([], [], false), 3], ["pointer", "pointer", "reflect", $funcType([], [$UnsafePointer], false), -1], ["recv", "recv", "reflect", $funcType([$Bool], [Value, $Bool], false), -1], ["runes", "runes", "reflect", $funcType([], [($sliceType($Int32))], false), -1], ["send", "send", "reflect", $funcType([Value, $Bool], [$Bool], false), -1], ["setRunes", "setRunes", "reflect", $funcType([($sliceType($Int32))], [], false), -1]];
-		Value.init([["typ", "typ", "reflect", ($ptrType(rtype)), ""], ["ptr", "ptr", "reflect", $UnsafePointer, ""], ["scalar", "scalar", "reflect", $Uintptr, ""], ["flag", "", "reflect", flag, ""]]);
-		flag.methods = [["kind", "kind", "reflect", $funcType([], [Kind], false), -1], ["mustBe", "mustBe", "reflect", $funcType([Kind], [], false), -1], ["mustBeAssignable", "mustBeAssignable", "reflect", $funcType([], [], false), -1], ["mustBeExported", "mustBeExported", "reflect", $funcType([], [], false), -1]];
-		($ptrType(flag)).methods = [["kind", "kind", "reflect", $funcType([], [Kind], false), -1], ["mustBe", "mustBe", "reflect", $funcType([Kind], [], false), -1], ["mustBeAssignable", "mustBeAssignable", "reflect", $funcType([], [], false), -1], ["mustBeExported", "mustBeExported", "reflect", $funcType([], [], false), -1]];
-		($ptrType(ValueError)).methods = [["Error", "Error", "", $funcType([], [$String], false), -1]];
-		ValueError.init([["Method", "Method", "", $String, ""], ["Kind", "Kind", "", Kind, ""]]);
-		nonEmptyInterface.init([["itab", "itab", "reflect", ($ptrType(($structType([["ityp", "ityp", "reflect", ($ptrType(rtype)), ""], ["typ", "typ", "reflect", ($ptrType(rtype)), ""], ["link", "link", "reflect", $UnsafePointer, ""], ["bad", "bad", "reflect", $Int32, ""], ["unused", "unused", "reflect", $Int32, ""], ["fun", "fun", "reflect", ($arrayType($UnsafePointer, 100000)), ""]])))), ""], ["word", "word", "reflect", iword, ""]]);
+		$pkg.$init = function() {};
+		/* */ var $r, $s = 0; var $init_reflect = function() { while (true) { switch ($s) { case 0:
+		$r = js.$init($BLOCKING); /* */ $s = 1; case 1: if ($r && $r.$blocking) { $r = $r(); }
+		$r = math.$init($BLOCKING); /* */ $s = 2; case 2: if ($r && $r.$blocking) { $r = $r(); }
+		$r = runtime.$init($BLOCKING); /* */ $s = 3; case 3: if ($r && $r.$blocking) { $r = $r(); }
+		$r = strconv.$init($BLOCKING); /* */ $s = 4; case 4: if ($r && $r.$blocking) { $r = $r(); }
+		$r = sync.$init($BLOCKING); /* */ $s = 5; case 5: if ($r && $r.$blocking) { $r = $r(); }
 		initialized = false;
-		kindNames = new ($sliceType($String))(["invalid", "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "float32", "float64", "complex64", "complex128", "array", "chan", "func", "interface", "map", "ptr", "slice", "string", "struct", "unsafe.Pointer"]);
-		uint8Type = $assertType(TypeOf(new $Uint8(0)), ($ptrType(rtype)));
+		stringPtrMap = new $Map();
+		jsObject = $js.Object;
+		jsContainer = $js.container.ptr;
+		kindNames = new sliceType$1(["invalid", "bool", "int", "int8", "int16", "int32", "int64", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "float32", "float64", "complex64", "complex128", "array", "chan", "func", "interface", "map", "ptr", "slice", "string", "struct", "unsafe.Pointer"]);
+		uint8Type = $assertType(TypeOf(new $Uint8(0)), ptrType$1);
 		init();
+		/* */ } return; } }; $init_reflect.$blocking = true; return $init_reflect;
 	};
 	return $pkg;
 })();
-$packages["main"] = (function() {
-	var $pkg = {}, js = $packages["github.com/gopherjs/gopherjs/js"], jquery = $packages["github.com/gopherjs/jquery"], reflect = $packages["reflect"], Person, jq, main, startListeners;
-	Person = $pkg.Person = $newType(0, "Struct", "main.Person", "Person", "main", function(Name_, Age_) {
+$packages["/Users/alex/programming/go/src/github.com/albrow/gopherjs-watch"] = (function() {
+	var $pkg = {}, js, jquery, reflect, Person, ptrType, sliceType, funcType, funcType$1, jq, main, BindField, OnChange;
+	js = $packages["github.com/gopherjs/gopherjs/js"];
+	jquery = $packages["github.com/gopherjs/jquery"];
+	reflect = $packages["reflect"];
+	Person = $pkg.Person = $newType(0, $kindStruct, "main.Person", "Person", "/Users/alex/programming/go/src/github.com/albrow/gopherjs-watch", function(Name_, Age_) {
 		this.$val = this;
 		this.Name = Name_ !== undefined ? Name_ : "";
 		this.Age = Age_ !== undefined ? Age_ : 0;
 	});
+	ptrType = $ptrType($String);
+	sliceType = $sliceType($emptyInterface);
+	funcType = $funcType([jquery.Event], [], false);
+	funcType$1 = $funcType([$String, $String, $String, $String], [], false);
 	main = function() {
 		var p;
 		console.log("starting...");
-		p = new Person.Ptr("", 0);
-		startListeners(p);
+		p = new Person.ptr("", 0);
+		BindField("input#name", new ptrType(function() { return this.$target.Name; }, function($v) { this.$target.Name = $v; }, p));
+		OnChange(p, (function() {
+			if (!(p.Name === "")) {
+				jq(new sliceType([new $String("#greeting")])).SetHtml(new $String("Hello, " + p.Name));
+			} else {
+				jq(new sliceType([new $String("#greeting")])).SetHtml(new $String(""));
+			}
+		}));
 	};
-	startListeners = function(model) {
-		var objVal;
-		objVal = new reflect.Value.Ptr(); $copy(objVal, reflect.ValueOf(model).Elem(), reflect.Value);
-		jq(new ($sliceType($emptyInterface))([new $String("[data-bind-value]")])).On(new ($sliceType($emptyInterface))([new $String("input"), new ($funcType([jquery.Event], [], false))((function(e) {
-			var prop, newVal;
-			prop = jq(new ($sliceType($emptyInterface))([e.Object.currentTarget])).Attr("data-bind-value");
-			newVal = jq(new ($sliceType($emptyInterface))([e.Object.currentTarget])).Val();
-			objVal.FieldByName(prop).Set($clone(reflect.ValueOf(new $String(newVal)), reflect.Value));
+	BindField = $pkg.BindField = function(selector, val) {
+		jq(new sliceType([new $String(selector)])).On(new sliceType([new $String("input"), new funcType((function(e) {
+			var newVal;
+			newVal = jq(new sliceType([new $String(selector)])).Val();
+			reflect.ValueOf(val).Elem().Set(reflect.ValueOf(new $String(newVal)));
 		}))]));
+	};
+	OnChange = $pkg.OnChange = function(model, f) {
 		$global.watch(model, $externalize((function(prop, action, newValue, oldValue) {
-			jq(new ($sliceType($emptyInterface))([new $String("[data-bind-html='" + prop + "']")])).SetHtml(new $String(newValue));
-		}), ($funcType([$String, $String, $String, $String], [], false))));
+			$go(f, []);
+		}), funcType$1));
 	};
-	$pkg.$run = function($b) {
-		$packages["github.com/gopherjs/gopherjs/js"].$init();
-		$packages["runtime"].$init();
-		$packages["github.com/gopherjs/jquery"].$init();
-		$packages["math"].$init();
-		$packages["errors"].$init();
-		$packages["unicode/utf8"].$init();
-		$packages["strconv"].$init();
-		$packages["sync/atomic"].$init();
-		$packages["sync"].$init();
-		$packages["reflect"].$init();
-		$pkg.$init();
-		main();
-	};
+	Person.init([{prop: "Name", name: "Name", pkg: "", type: $String, tag: ""}, {prop: "Age", name: "Age", pkg: "", type: $Int, tag: ""}]);
 	$pkg.$init = function() {
-		Person.init([["Name", "Name", "", $String, ""], ["Age", "Age", "", $Int, ""]]);
+		$pkg.$init = function() {};
+		/* */ var $r, $s = 0; var $init_main = function() { while (true) { switch ($s) { case 0:
+		$r = js.$init($BLOCKING); /* */ $s = 1; case 1: if ($r && $r.$blocking) { $r = $r(); }
+		$r = jquery.$init($BLOCKING); /* */ $s = 2; case 2: if ($r && $r.$blocking) { $r = $r(); }
+		$r = reflect.$init($BLOCKING); /* */ $s = 3; case 3: if ($r && $r.$blocking) { $r = $r(); }
 		jq = jquery.NewJQuery;
+		main();
+		/* */ } return; } }; $init_main.$blocking = true; return $init_main;
 	};
 	return $pkg;
 })();
-$go($packages["main"].$run, [], true);
+$initAnonTypes();
+$packages["runtime"].$init()();
+$go($packages["/Users/alex/programming/go/src/github.com/albrow/gopherjs-watch"].$init, [], true);
+$flushConsole();
 
-})();
+})(this);
 //# sourceMappingURL=main.js.map

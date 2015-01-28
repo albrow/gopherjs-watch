@@ -13,7 +13,14 @@ func main() {
 	p := &Person{
 		Name: "",
 	}
-	startListeners(p)
+	BindField("input#name", &(p.Name))
+	OnChange(p, func() {
+		if p.Name != "" {
+			jq("#greeting").SetHtml("Hello, " + p.Name)
+		} else {
+			jq("#greeting").SetHtml("")
+		}
+	})
 }
 
 type Person struct {
@@ -21,14 +28,15 @@ type Person struct {
 	Age  int
 }
 
-func startListeners(model interface{}) {
-	objVal := reflect.ValueOf(model).Elem()
-	jq("[data-bind-value]").On("input", func(e jquery.Event) {
-		prop := jq(e.CurrentTarget).Attr("data-bind-value")
-		newVal := jq(e.CurrentTarget).Val()
-		objVal.FieldByName(prop).Set(reflect.ValueOf(newVal))
+func BindField(selector string, val interface{}) {
+	jq(selector).On("input", func(e jquery.Event) {
+		newVal := jq(selector).Val()
+		reflect.ValueOf(val).Elem().Set(reflect.ValueOf(newVal))
 	})
+}
+
+func OnChange(model interface{}, f func()) {
 	js.Global.Call("watch", js.InternalObject(model), func(prop string, action string, newValue string, oldValue string) {
-		jq("[data-bind-html='" + prop + "']").SetHtml(newValue)
+		go f()
 	})
 }

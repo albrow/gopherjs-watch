@@ -5,27 +5,12 @@
 </head>
 
 <body>
-	<input type="text" id="name" data-bind-value="Name" autocomplete="off" />
-	<h3 data-bind-html="Name"></h3>
+	<input type="text" id="name" placeholder="Enter your name" autocomplete="off" />
+	<h3 id="greeting"></h3>
 	<script type="application/javascript" src="watch.js"></script>
 	<script type="application/javascript" src="jquery-2.1.1.min.js"></script>
 	<script type="application/javascript" src="main.js"></script>
 	<script type="application/javascript">
-	// var p = {}
-	// p.Name = "";
-	// $("input[data-bind-value]").on('input', function(e) {
-	// 	var el = $(this);
-	// 	var prop = el.attr("data-bind-value");
-	// 	var newVal = el.val();
-	// 	console.log(window.performance.now());
-	// 	p.Name = newVal;
-	// 	console.log(window.performance.now());
-	// });
-	// el = $("[data-bind-html='Name']");
-	// watch(p, "Name", function(prop, action, newValue, oldValue) {
-	// 	console.log(window.performance.now());
-	// 	el.html(newValue);
-	// });
 	</script>
 </body>
 
